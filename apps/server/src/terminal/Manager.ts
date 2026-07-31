@@ -170,7 +170,10 @@ export class TerminalManager extends Context.Service<
     /**
      * Clear terminal output history.
      */
-    readonly clear: (input: TerminalClearInput) => Effect.Effect<void, TerminalError>;
+    readonly clear: (
+      input: TerminalClearInput,
+      controllerSessionId: AuthSessionId | null,
+    ) => Effect.Effect<void, TerminalError>;
 
     /**
      * Restart a terminal session in place.
@@ -179,6 +182,7 @@ export class TerminalManager extends Context.Service<
      */
     readonly restart: (
       input: TerminalRestartInput,
+      controllerSessionId: AuthSessionId | null,
     ) => Effect.Effect<TerminalSessionSnapshot, TerminalError>;
 
     /**
@@ -186,7 +190,10 @@ export class TerminalManager extends Context.Service<
      *
      * When `terminalId` is omitted, closes all sessions for the thread.
      */
-    readonly close: (input: TerminalCloseInput) => Effect.Effect<void, TerminalError>;
+    readonly close: (
+      input: TerminalCloseInput,
+      controllerSessionId: AuthSessionId | null,
+    ) => Effect.Effect<void, TerminalError>;
 
     /**
      * Subscribe to terminal runtime events with a direct callback.
@@ -1728,6 +1735,25 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     }
   });
 
+  const requireMutationControlLocked = Effect.fn("terminal.requireMutationControlLocked")(
+    function* (
+      input: { readonly threadId: string; readonly terminalId: string },
+      controllerSessionId: AuthSessionId | null,
+    ) {
+      // Lifecycle actions may target an unowned Terminal, but never one controlled by another session.
+      if (controllerSessionId === null) return;
+      const controller = (yield* readManagerState).controllers.get(
+        toSessionKey(input.threadId, input.terminalId),
+      );
+      if (controller !== undefined && controller !== controllerSessionId) {
+        return yield* new TerminalControlError({
+          threadId: input.threadId,
+          terminalId: input.terminalId,
+        });
+      }
+    },
+  );
+
   const releaseControlLocked = Effect.fn("terminal.releaseControlLocked")(function* (
     input: { readonly threadId: string; readonly terminalId: string },
     controllerSessionId: AuthSessionId,
@@ -2381,8 +2407,16 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
       runtimeEnvChanged ||
       liveSession.worktreePath !== nextWorktreePath;
     const currentController = (yield* readManagerState).controllers.get(sessionKey);
+    if (!liveSession.process) {
+      yield* requireMutationControlLocked(
+        { threadId: input.threadId, terminalId },
+        controllerSessionId,
+      );
+    }
     const canAdjustRunningTerminal =
-      controllerSessionId === null || currentController === controllerSessionId;
+      controllerSessionId === null ||
+      currentController === undefined ||
+      currentController === controllerSessionId;
 
     if (launchContextChanged) {
       if (liveSession.process && !canAdjustRunningTerminal) {
@@ -2797,12 +2831,13 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
   const resize: TerminalManager["Service"]["resize"] = (input, controllerSessionId) =>
     withThreadLock(input.threadId, resizeLocked(input, controllerSessionId));
 
-  const clear: TerminalManager["Service"]["clear"] = (input) =>
+  const clear: TerminalManager["Service"]["clear"] = (input, controllerSessionId) =>
     withThreadLock(
       input.threadId,
       Effect.gen(function* () {
         const terminalId = input.terminalId;
         const session = yield* requireSession(input.threadId, terminalId);
+        yield* requireMutationControlLocked(input, controllerSessionId);
         session.history = "";
         session.pendingHistoryControlSequence = "";
         session.pendingProcessEvents = [];
@@ -2819,12 +2854,13 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
       }),
     );
 
-  const restart: TerminalManager["Service"]["restart"] = (input) =>
+  const restart: TerminalManager["Service"]["restart"] = (input, controllerSessionId) =>
     withThreadLock(
       input.threadId,
       Effect.gen(function* () {
         yield* increment(terminalRestartsTotal, { scope: "thread" });
         const terminalId = input.terminalId;
+        yield* requireMutationControlLocked(input, controllerSessionId);
         yield* assertValidCwd(input.cwd);
 
         const sessionKey = toSessionKey(input.threadId, terminalId);
@@ -2899,16 +2935,27 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
       }),
     );
 
-  const close: TerminalManager["Service"]["close"] = (input) =>
+  const close: TerminalManager["Service"]["close"] = (input, controllerSessionId) =>
     withThreadLock(
       input.threadId,
       Effect.gen(function* () {
         if (input.terminalId) {
-          yield* closeSession(input.threadId, input.terminalId, input.deleteHistory === true);
+          const terminalId = input.terminalId;
+          const session = yield* getSession(input.threadId, terminalId);
+          if (Option.isSome(session)) {
+            yield* requireMutationControlLocked(
+              { threadId: input.threadId, terminalId },
+              controllerSessionId,
+            );
+          }
+          yield* closeSession(input.threadId, terminalId, input.deleteHistory === true);
           return;
         }
 
         const threadSessions = yield* sessionsForThread(input.threadId);
+        for (const session of threadSessions) {
+          yield* requireMutationControlLocked(session, controllerSessionId);
+        }
         yield* Effect.forEach(
           threadSessions,
           (session) => closeSession(input.threadId, session.terminalId, false),

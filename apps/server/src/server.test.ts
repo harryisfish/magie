@@ -6478,13 +6478,17 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       const threadId = ThreadId.make("thread-archive");
       const effects: string[] = [];
       const dispatchedCommands: Array<OrchestrationCommand> = [];
+      let terminalCloseCaller:
+        | Parameters<TerminalManager.TerminalManager["Service"]["close"]>[1]
+        | undefined;
       const now = "2026-01-01T00:00:00.000Z";
 
       yield* buildAppUnderTest({
         layers: {
           terminalManager: {
-            close: (input) =>
+            close: (input, controllerSessionId) =>
               Effect.sync(() => {
+                terminalCloseCaller = controllerSessionId;
                 effects.push(`terminal.close:${input.threadId}`);
               }),
           },
@@ -6541,6 +6545,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       if (sessionStopCommand?.type === "thread.session.stop") {
         assert.equal(sessionStopCommand.threadId, threadId);
       }
+      assert.equal(terminalCloseCaller, null);
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 
@@ -7383,6 +7388,9 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
 
   it.effect("routes websocket rpc terminal methods", () =>
     Effect.gen(function* () {
+      const mutationCallers: Array<
+        Parameters<TerminalManager.TerminalManager["Service"]["clear"]>[1]
+      > = [];
       const snapshot = {
         threadId: "thread-1",
         terminalId: "default",
@@ -7409,9 +7417,19 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
               }),
             write: () => Effect.void,
             resize: () => Effect.void,
-            clear: () => Effect.void,
-            restart: () => Effect.succeed(snapshot),
-            close: () => Effect.void,
+            clear: (_input, controllerSessionId) =>
+              Effect.sync(() => {
+                mutationCallers.push(controllerSessionId);
+              }),
+            restart: (_input, controllerSessionId) =>
+              Effect.sync(() => {
+                mutationCallers.push(controllerSessionId);
+                return snapshot;
+              }),
+            close: (_input, controllerSessionId) =>
+              Effect.sync(() => {
+                mutationCallers.push(controllerSessionId);
+              }),
           },
         },
       });
@@ -7491,6 +7509,8 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
           }),
         ),
       );
+      assert.equal(mutationCallers.length, 3);
+      assertTrue(mutationCallers.every((controllerSessionId) => controllerSessionId !== null));
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 

@@ -187,11 +187,11 @@ Web, desktop, and mobile can display the same Terminal at the same time. Every a
 the current scrollback snapshot and continues receiving live output.
 
 Only the controlling client can type or change the Terminal size. The first active view can claim an
-uncontrolled Terminal without interrupting anyone. Other clients cannot type or resize and show a
-**Take control** action; using it transfers control immediately, while output remains visible on all
-devices. Closing one connection does not release control while another connection from the same
-paired client remains open. Control becomes available after that paired client's last connection
-closes.
+uncontrolled Terminal without interrupting anyone. Hidden or unfocused views do not claim it. Other
+clients cannot type, resize, clear, restart, or close the controlled Terminal or its retained history and show a **Take control**
+action; using it transfers control immediately, while output remains visible on all devices. Closing
+one connection does not release control while another connection from the same paired client remains
+open. Control becomes available after that paired client's last connection closes.
 
 Terminal processes still belong to the running T3 Code server. Restarting or stopping that server
 ends its live PTYs; cross-restart Terminal persistence is not provided by this behavior.

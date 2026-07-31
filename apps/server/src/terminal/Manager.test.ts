@@ -239,6 +239,18 @@ function testTerminalManager(manager: TerminalManager.TerminalManager["Service"]
       input: Parameters<TerminalManager.TerminalManager["Service"]["resize"]>[0],
       controllerSessionId: AuthSessionId | null = null,
     ) => manager.resize(input, controllerSessionId),
+    clear: (
+      input: Parameters<TerminalManager.TerminalManager["Service"]["clear"]>[0],
+      controllerSessionId: AuthSessionId | null = null,
+    ) => manager.clear(input, controllerSessionId),
+    restart: (
+      input: Parameters<TerminalManager.TerminalManager["Service"]["restart"]>[0],
+      controllerSessionId: AuthSessionId | null = null,
+    ) => manager.restart(input, controllerSessionId),
+    close: (
+      input: Parameters<TerminalManager.TerminalManager["Service"]["close"]>[0],
+      controllerSessionId: AuthSessionId | null = null,
+    ) => manager.close(input, controllerSessionId),
   };
 }
 
@@ -637,6 +649,169 @@ it.layer(
         { cols: 120, rows: 30 },
         { cols: 140, rows: 40 },
       ]);
+    }),
+  );
+
+  it.effect("protects clear, restart, and close from observers", () =>
+    Effect.gen(function* () {
+      const { manager, ptyAdapter, getEvents } = yield* createManager();
+      const controller = AuthSessionId.make("terminal-controller");
+      const observer = AuthSessionId.make("terminal-observer");
+      yield* manager.open(openInput(), null);
+      yield* manager.claimControl(
+        { threadId: "thread-1", terminalId: DEFAULT_TERMINAL_ID, force: false },
+        controller,
+      );
+      const process = ptyAdapter.processes[0];
+      expect(process).toBeDefined();
+      if (!process) return;
+      process.emitData("protected output\n");
+      yield* waitFor(
+        Effect.map(getEvents, (events) =>
+          events.some((event) => event.type === "output" && event.data === "protected output\n"),
+        ),
+        "1200 millis",
+      );
+
+      expect(
+        yield* Effect.flip(
+          manager.clear({ threadId: "thread-1", terminalId: DEFAULT_TERMINAL_ID }, observer),
+        ),
+      ).toMatchObject({ _tag: "TerminalControlError" });
+      expect(yield* manager.open(openInput(), controller)).toMatchObject({
+        history: "protected output\n",
+      });
+      expect(yield* Effect.flip(manager.restart(restartInput(), observer))).toMatchObject({
+        _tag: "TerminalControlError",
+      });
+      expect(
+        yield* Effect.flip(
+          manager.close({ threadId: "thread-1", terminalId: DEFAULT_TERMINAL_ID }, observer),
+        ),
+      ).toMatchObject({ _tag: "TerminalControlError" });
+      expect(process.killSignals).toEqual([]);
+      expect(ptyAdapter.spawnInputs).toHaveLength(1);
+
+      yield* manager.clear({ threadId: "thread-1", terminalId: DEFAULT_TERMINAL_ID }, controller);
+      expect(yield* manager.open(openInput(), controller)).toMatchObject({ history: "" });
+      yield* manager.restart(restartInput(), controller);
+      expect(ptyAdapter.spawnInputs).toHaveLength(2);
+      yield* manager.close({ threadId: "thread-1", terminalId: DEFAULT_TERMINAL_ID }, controller);
+    }),
+  );
+
+  it.effect("allows lifecycle mutations while the terminal is uncontrolled", () =>
+    Effect.gen(function* () {
+      const { manager, ptyAdapter } = yield* createManager();
+      const caller = AuthSessionId.make("terminal-unowned-caller");
+      yield* manager.open(openInput(), null);
+      const firstProcess = ptyAdapter.processes[0];
+      expect(firstProcess).toBeDefined();
+      if (!firstProcess) return;
+
+      yield* manager.open(openInput({ cols: 120, rows: 30 }), caller);
+      expect(firstProcess.resizeCalls).toEqual([{ cols: 120, rows: 30 }]);
+
+      yield* manager.clear({ threadId: "thread-1", terminalId: DEFAULT_TERMINAL_ID }, caller);
+      yield* manager.restart(restartInput(), caller);
+      yield* manager.close({ threadId: "thread-1", terminalId: DEFAULT_TERMINAL_ID }, caller);
+
+      expect(ptyAdapter.spawnInputs).toHaveLength(2);
+      expect(ptyAdapter.processes[1]?.killSignals).toEqual(["SIGTERM"]);
+    }),
+  );
+
+  it.effect("protects controlled inactive terminal state from observers", () =>
+    Effect.gen(function* () {
+      const { manager, ptyAdapter, getEvents } = yield* createManager();
+      const controller = AuthSessionId.make("terminal-inactive-controller");
+      const observer = AuthSessionId.make("terminal-inactive-observer");
+      yield* manager.open(openInput(), null);
+      yield* manager.claimControl(
+        { threadId: "thread-1", terminalId: DEFAULT_TERMINAL_ID, force: false },
+        controller,
+      );
+      const process = ptyAdapter.processes[0];
+      expect(process).toBeDefined();
+      if (!process) return;
+      process.emitData("retained output\n");
+      process.emitExit({ exitCode: 0, signal: 0 });
+      yield* waitFor(
+        Effect.map(getEvents, (events) => events.some((event) => event.type === "exited")),
+        "1200 millis",
+      );
+
+      expect(
+        yield* Effect.flip(
+          manager.clear({ threadId: "thread-1", terminalId: DEFAULT_TERMINAL_ID }, observer),
+        ),
+      ).toMatchObject({ _tag: "TerminalControlError" });
+      expect(
+        yield* Effect.flip(
+          manager.close(
+            { threadId: "thread-1", terminalId: DEFAULT_TERMINAL_ID, deleteHistory: true },
+            observer,
+          ),
+        ),
+      ).toMatchObject({ _tag: "TerminalControlError" });
+      expect(yield* Effect.flip(manager.open(openInput(), observer))).toMatchObject({
+        _tag: "TerminalControlError",
+      });
+
+      const attachEvents = yield* Ref.make<ReadonlyArray<TerminalAttachStreamEvent>>([]);
+      const unsubscribe = yield* manager.attachStream(
+        openInput(),
+        (event) => Ref.update(attachEvents, (events) => [...events, event]),
+        observer,
+      );
+      yield* Effect.addFinalizer(() => Effect.sync(unsubscribe));
+      expect(yield* Ref.get(attachEvents)).toMatchObject([
+        {
+          type: "snapshot",
+          control: "observer",
+          snapshot: { status: "exited", history: "retained output\n" },
+        },
+      ]);
+      expect((yield* getEvents).some((event) => event.type === "closed")).toBe(false);
+
+      yield* manager.open(openInput(), controller);
+      expect(ptyAdapter.spawnInputs).toHaveLength(2);
+    }),
+  );
+
+  it.effect("rejects thread-wide close before closing any terminal owned by another session", () =>
+    Effect.gen(function* () {
+      const { manager, ptyAdapter, getEvents } = yield* createManager();
+      const firstController = AuthSessionId.make("terminal-controller-1");
+      const secondController = AuthSessionId.make("terminal-controller-2");
+      yield* manager.open(openInput(), null);
+      yield* manager.open(openInput({ terminalId: "sidecar" }), null);
+      yield* manager.claimControl(
+        { threadId: "thread-1", terminalId: DEFAULT_TERMINAL_ID, force: false },
+        firstController,
+      );
+      yield* manager.claimControl(
+        { threadId: "thread-1", terminalId: "sidecar", force: false },
+        secondController,
+      );
+      const sidecarProcess = ptyAdapter.processes[1];
+      expect(sidecarProcess).toBeDefined();
+      if (!sidecarProcess) return;
+      sidecarProcess.emitExit({ exitCode: 0, signal: 0 });
+      yield* waitFor(
+        Effect.map(getEvents, (events) =>
+          events.some((event) => event.type === "exited" && event.terminalId === "sidecar"),
+        ),
+        "1200 millis",
+      );
+
+      expect(
+        yield* Effect.flip(manager.close({ threadId: "thread-1" }, firstController)),
+      ).toMatchObject({ _tag: "TerminalControlError", terminalId: "sidecar" });
+      expect(ptyAdapter.processes).toHaveLength(2);
+      expect(ptyAdapter.processes[0]?.killSignals).toEqual([]);
+      expect(ptyAdapter.processes[1]?.killSignals).toEqual([]);
+      expect((yield* getEvents).some((event) => event.type === "closed")).toBe(false);
     }),
   );
 

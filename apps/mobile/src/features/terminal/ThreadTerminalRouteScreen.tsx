@@ -3,7 +3,12 @@ import { type KnownTerminalSession } from "@t3tools/client-runtime/state/termina
 import type { MenuAction } from "@react-native-menu/menu";
 import { SymbolView } from "../../components/AppSymbol";
 import { NativeHeaderToolbar, NativeStackScreenOptions } from "../../native/StackHeader";
-import { StackActions, useNavigation, type StaticScreenProps } from "@react-navigation/native";
+import {
+  StackActions,
+  useIsFocused,
+  useNavigation,
+  type StaticScreenProps,
+} from "@react-navigation/native";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Platform, Pressable, View, useColorScheme } from "react-native";
 import {
@@ -161,6 +166,7 @@ type ThreadTerminalRouteScreenProps = StaticScreenProps<{
 
 export function ThreadTerminalRouteScreen(props: ThreadTerminalRouteScreenProps) {
   const navigation = useNavigation();
+  const isFocused = useIsFocused();
   const writeTerminal = useAtomCommand(terminalEnvironment.write, "terminal write");
   const resizeTerminal = useAtomCommand(terminalEnvironment.resize, "terminal resize");
   const claimTerminalControl = useAtomCommand(
@@ -342,7 +348,7 @@ export function ThreadTerminalRouteScreen(props: ThreadTerminalRouteScreenProps)
     environmentId: selectedThread?.environmentId ?? null,
     terminal: terminalAttachInput,
   });
-  const previousTerminalControlRef = useRef(terminal.control);
+  const previousInteractiveControllerRef = useRef(false);
   const terminalKey = selectedThread
     ? `${selectedThread.environmentId}:${selectedThread.id}:${terminalId}`
     : terminalId;
@@ -360,9 +366,10 @@ export function ThreadTerminalRouteScreen(props: ThreadTerminalRouteScreenProps)
   });
   const isRunning = terminal.status === "running" || terminal.status === "starting";
   const isController = terminal.control === "controller";
+  const isInteractiveController = isFocused && isController;
 
   useEffect(() => {
-    if (terminal.version === 0) return;
+    if (!isFocused || terminal.version === 0) return;
     if (terminal.status !== "running") {
       if (
         (terminal.status === "closed" ||
@@ -387,6 +394,7 @@ export function ThreadTerminalRouteScreen(props: ThreadTerminalRouteScreenProps)
     });
   }, [
     claimTerminalControl,
+    isFocused,
     selectedThread,
     terminal.control,
     terminal.status,
@@ -652,7 +660,7 @@ export function ThreadTerminalRouteScreen(props: ThreadTerminalRouteScreenProps)
       !initialInput ||
       !selectedThread ||
       terminal.version === 0 ||
-      !isController ||
+      !isInteractiveController ||
       sentInitialInputKeyRef.current === launchTargetKey
     ) {
       return;
@@ -669,7 +677,7 @@ export function ThreadTerminalRouteScreen(props: ThreadTerminalRouteScreenProps)
   }, [
     launchTargetKey,
     pendingLaunch?.initialInput,
-    isController,
+    isInteractiveController,
     selectedThread,
     terminal.version,
     terminalId,
@@ -679,6 +687,7 @@ export function ThreadTerminalRouteScreen(props: ThreadTerminalRouteScreenProps)
   useEffect(() => {
     firstNonEmptyBufferLoggedRef.current = false;
     sentInitialInputKeyRef.current = null;
+    previousInteractiveControllerRef.current = false;
   }, [terminalKey]);
 
   const clearBufferReplayTimer = useCallback(() => {
@@ -738,7 +747,7 @@ export function ThreadTerminalRouteScreen(props: ThreadTerminalRouteScreenProps)
 
   const writeInput = useCallback(
     (data: string) => {
-      if (!selectedThread || !isRunning || !isController) {
+      if (!selectedThread || !isRunning || !isInteractiveController) {
         return;
       }
 
@@ -751,7 +760,7 @@ export function ThreadTerminalRouteScreen(props: ThreadTerminalRouteScreenProps)
         },
       });
     },
-    [isController, isRunning, selectedThread, terminalId, writeTerminal],
+    [isInteractiveController, isRunning, selectedThread, terminalId, writeTerminal],
   );
 
   const handleInput = useCallback(
@@ -799,7 +808,7 @@ export function ThreadTerminalRouteScreen(props: ThreadTerminalRouteScreenProps)
       }
 
       setLastGridSize(size);
-      if (!selectedThread || !isRunning || !isController) {
+      if (!selectedThread || !isRunning || !isInteractiveController) {
         return;
       }
 
@@ -815,7 +824,7 @@ export function ThreadTerminalRouteScreen(props: ThreadTerminalRouteScreenProps)
     },
     [
       isRunning,
-      isController,
+      isInteractiveController,
       lastGridSize.cols,
       lastGridSize.rows,
       bufferReplayKey,
@@ -831,9 +840,10 @@ export function ThreadTerminalRouteScreen(props: ThreadTerminalRouteScreenProps)
   );
 
   useEffect(() => {
-    const becameController = previousTerminalControlRef.current !== "controller" && isController;
-    previousTerminalControlRef.current = terminal.control;
-    if (!selectedThread || !isRunning || !becameController) return;
+    const becameInteractiveController =
+      !previousInteractiveControllerRef.current && isInteractiveController && isRunning;
+    previousInteractiveControllerRef.current = isInteractiveController && isRunning;
+    if (!selectedThread || !becameInteractiveController) return;
     void resizeTerminal({
       environmentId: selectedThread.environmentId,
       input: {
@@ -844,13 +854,12 @@ export function ThreadTerminalRouteScreen(props: ThreadTerminalRouteScreenProps)
       },
     });
   }, [
-    isController,
+    isInteractiveController,
     isRunning,
     lastGridSize.cols,
     lastGridSize.rows,
     resizeTerminal,
     selectedThread,
-    terminal.control,
     terminalId,
   ]);
 
@@ -1059,7 +1068,7 @@ export function ThreadTerminalRouteScreen(props: ThreadTerminalRouteScreenProps)
   );
 
   const handleClearTerminal = useCallback(() => {
-    if (!selectedThread || !isController) {
+    if (!selectedThread || !isInteractiveController) {
       return;
     }
 
@@ -1071,11 +1080,11 @@ export function ThreadTerminalRouteScreen(props: ThreadTerminalRouteScreenProps)
         terminalId,
       },
     });
-  }, [clearTerminal, isController, selectedThread, terminalId]);
+  }, [clearTerminal, isInteractiveController, selectedThread, terminalId]);
 
   const handleToolbarActionPress = useCallback(
     (action: TerminalToolbarAction) => {
-      if (!isController) return;
+      if (!isInteractiveController) return;
       if (action.kind === "modifier") {
         setPendingModifierState((current) => ({
           terminalId,
@@ -1101,7 +1110,7 @@ export function ThreadTerminalRouteScreen(props: ThreadTerminalRouteScreenProps)
         writeInput(action.data);
       }
     },
-    [handleClearTerminal, isController, pendingModifier, terminalId, writeInput],
+    [handleClearTerminal, isInteractiveController, pendingModifier, terminalId, writeInput],
   );
 
   const handleDismissKeyboard = useCallback(() => {

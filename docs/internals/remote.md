@@ -209,9 +209,10 @@ paths differ.
 the authenticated client (`available`, `controller`, or `observer`) but does not mutate ownership.
 
 `terminal.claimControl` uses the authenticated `AuthSessionId`. A non-force claim can take only an
-unowned Terminal; `force: true` performs an explicit takeover. `terminal.write`, `terminal.resize`,
-and size-changing `terminal.open` paths verify that session before touching a running PTY. Trusted
-server-side setup scripts pass an explicit internal caller instead of creating a synthetic owner.
+unowned Terminal; `force: true` performs an explicit takeover. Input, resize, clear, restart, close,
+and process-starting or size-changing `terminal.open` paths verify that session before mutating a
+controlled Terminal, including retained state after its process exits. Trusted server-side setup and
+thread-cleanup paths pass an explicit internal caller instead of creating a synthetic owner.
 
 Control changes are streamed to every viewer relative to its own Auth Session. `SessionStore`
 counts concurrent WebSockets for that session, so closing one tab or reconnecting one socket does
@@ -220,6 +221,10 @@ Session under the existing per-thread lock, then publishes `available` to remain
 
 Ownership is process-local, matching the current PTY lifetime. This does not add a detached terminal
 daemon or preserve a live PTY across a server restart.
+
+Clients attempt the initial non-force claim only while the Terminal view is visible and focused.
+Hidden web drawers and blurred mobile routes keep receiving output but do not silently take control
+or report their background geometry.
 
 ## Security model
 

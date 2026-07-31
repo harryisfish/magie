@@ -19,8 +19,11 @@
 - Web/Desktop 与 Mobile 的 Environment 设置会消费 active prepared connection；连到 fallback 时可显示实际 endpoint。Showcase 投影不再覆盖未命中环境的 fallback 列表。
 - legacy 首 endpoint 始终是新旧客户端共同的第一真相；URL 上限在规范化去重后执行，真实 JSON roundtrip 兼容测试已覆盖旧文档。
 - 完成 Terminal control contract、viewer-relative attach 投影、服务端 owner 门禁、force takeover 与最后 Auth Session 连接断开释放。
-- `write` / `resize` 不再隐式 claim；Web/Desktop 与真实 Mobile Route 首次 hydration 可静默领取无主 Terminal，observer / released 状态提供显式 Take control，观察端输入和尺寸上报均被拦截。
-- `terminal.open` 对运行中 PTY 的 resize / launch-context 变更服从 controller；服务端 setup script 使用显式 trusted caller，不会留下永久 pseudo owner。
+- `write` / `resize` 不再隐式 claim；只有 visible Web drawer 或 focused Mobile Route 首次 hydration 可静默领取无主 Terminal，observer / released 状态提供显式 Take control，隐藏、失焦或观察端输入和尺寸上报均被拦截。
+- `terminal.open` 的 process start / resize / launch-context 变更、`clear` / `restart` / `close` 均拒绝跨 owner，覆盖 process 已退出但 session / history 仍保留的状态；无主状态可执行，setup、archive 与 thread deletion cleanup 使用显式 trusted caller。
+- Web drawer、当前 Thread、单个 Right Panel terminal 与批量 surface close 均按 RPC 结果删除成功项并保留失败项；Terminal surface 只移除捕获的 terminal ID，等待期间新增 split 不受影响。
+- `Manager.test.ts` 覆盖 running / inactive observer mutation 拒绝、authenticated unowned lifecycle mutation 与 thread-wide close ownership 预检；server route seam 覆盖真实 Auth Session 与 trusted `null` caller。
+- Mobile 只在 focused + running + controller 边沿补报最新尺寸，exited → running 后不会沿用过期网格。
 - 双 attach 回归证明两个客户端收到同一 snapshot 和 live output；takeover 后旧 owner 立即投影为 observer，断线释放后投影为 available。
 - 自然退出后重新 open 的 live snapshot 会按 viewer Auth Session 保留 `controller` / `observer` 真相，不再固定投影为 `available`。
 - Showcase 环境不会通过 live prepared connection 绕过 cosmetic URL 映射；只改 label 时仍保存完整真实 fallback URL 列表。
@@ -28,7 +31,7 @@
 
 ## 进行中
 
-- 无；代码、文档、验证和交付前 diff 审计已完成，等待只读 preflight、commit 与 push。
+- 无；实现、focused 验证、类型检查、targeted build、diff 与只读审查均已收敛。Git / preflight `--no-merge` 状态在最终交付报告中记录。
 
 ## 修改文件
 
@@ -36,7 +39,7 @@
 - `.planning/acro-capability-migration-2026-08-01_01-07-42/{task_plan,findings,progress}.md`：本任务持久化计划。
 - `packages/client-runtime/src/connection/*`、`rpc/session*`、`platform/storageDocument.test.ts`：多 endpoint schema、旧数据兼容、轮换、预算、Environment ID 复核、展示与回归。
 - `packages/contracts/src/{terminal,rpc,ipc}.ts`、`packages/client-runtime/src/state/terminal*.ts`：Terminal control contract、RPC 与客户端投影。
-- `apps/server/src/{terminal/Manager*,auth/SessionStore*,auth/RpcAuthorization.ts,ws.ts,project/ProjectSetupScriptRunner*,server.test.ts}`：owner 门禁、双订阅、最后连接释放、trusted setup caller 与 RPC seam。
+- `apps/server/src/{terminal/Manager*,auth/SessionStore*,auth/RpcAuthorization.ts,ws.ts,project/ProjectSetupScriptRunner*,server.test.ts,orchestration/Layers/ThreadDeletionReactor.ts}`：owner 门禁、双订阅、最后连接释放、trusted cleanup caller 与 RPC seam。
 - `apps/web/src/{connection/onboarding.ts,state/environments.ts,components/ChatView.tsx,components/ThreadTerminalDrawer.tsx,components/settings/ConnectionsSettings.tsx}`：Web/Desktop 多 URL 编辑、active endpoint 与 Terminal control UI。
 - `apps/mobile/src/{connection,state,features/connection,features/settings,features/showcase,features/terminal}/...`：Mobile 多 URL、Showcase 安全投影与真实 Terminal Route 控制 UI。
 - `docs/user/remote-access.md`、`docs/internals/{connection-runtime,remote,glossary}.md`：用户行为和内部架构说明。
@@ -57,15 +60,25 @@
 | `git diff --check`                                           | 无 whitespace error                                                                   | 通过   |
 | 调用方与文档终审                                             | Connection、Terminal client/server、tests、docs 五路只读审计无剩余 blocker            | 通过   |
 | 浏览器 / 模拟器视觉验收                                      | 未执行；本任务未授权启动浏览器或 Computer Use，未将源码/测试证据冒充视觉验收          | 未执行 |
+| preflight 修复 focused tests                                 | Server core 2 files / 58 tests；Web 4 / 83；Mobile 6 / 35                             | 通过   |
+| mutation route / archive seam                                | 1 file / 2 selected tests（114 skipped）；分别断言真实 Session 与 trusted `null`      | 通过   |
+| follow-up Manager regression                                 | 1 file / 56 tests，含 running / inactive observer、available 与 thread-wide close     | 通过   |
+| Server bundle / Web production build                         | `t3 build:bundle` 与 `@t3tools/web build` 均成功；Web 仅有既存 chunk/plugin 提示      | 通过   |
+| follow-up formatter / diff                                   | `vp fmt` 覆盖 15 个修复文件；`git diff --check` 无错误                                | 通过   |
 
 ## 错误与恢复
 
-| 错误                           | 尝试 | 解决方式                                                                     |
-| ------------------------------ | ---: | ---------------------------------------------------------------------------- |
-| 当前 shell 找不到 `vp`         |    1 | 使用锁定的 `pnpm exec vp`；首次执行完成 worktree 依赖安装，未修改 lockfile。 |
-| Resolver endpoint 被推断为可空 |    1 | 将 endpoint helper 返回类型收紧为非空 tuple，typecheck 通过。                |
-| Showcase 显示真实 prepared URL |    1 | Showcase route 隐藏 active endpoint；真实 fallback 保存逻辑保持不变。        |
-| live reopen control 投影失真   |    1 | `started` snapshot 按 viewer 读取 control，并补双 viewer reopen 回归。       |
+| 错误                            | 尝试 | 解决方式                                                                     |
+| ------------------------------- | ---: | ---------------------------------------------------------------------------- |
+| 当前 shell 找不到 `vp`          |    1 | 使用锁定的 `pnpm exec vp`；首次执行完成 worktree 依赖安装，未修改 lockfile。 |
+| Resolver endpoint 被推断为可空  |    1 | 将 endpoint helper 返回类型收紧为非空 tuple，typecheck 通过。                |
+| Showcase 显示真实 prepared URL  |    1 | Showcase route 隐藏 active endpoint；真实 fallback 保存逻辑保持不变。        |
+| live reopen control 投影失真    |    1 | `started` snapshot 按 viewer 读取 control，并补双 viewer reopen 回归。       |
+| preflight：observer 可 mutation |    1 | clear / restart / close 传 Auth Session 并在共享 Manager 内统一校验。        |
+| preflight：后台视图静默 claim   |    1 | Web / Mobile 以 visible / focused 门禁，并仅在恢复交互时上报最新尺寸。       |
+| Server close 类型未收窄         |    1 | 显式提取 `terminalId` 后传入 helper；Server typecheck 通过。                 |
+| inactive observer 可清历史/会话 |    1 | 对所有保留 session 校验 owner，并补 exited clear / close / open 回归。       |
+| 无主 authenticated open 不调整  |    1 | 允许 `currentController === undefined`，补 resize 回归并通过 Manager tests。 |
 
 ## 交付边界
 

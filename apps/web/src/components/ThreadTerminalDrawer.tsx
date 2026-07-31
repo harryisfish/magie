@@ -244,6 +244,7 @@ interface TerminalViewportProps {
   onSessionExited: () => void;
   onAddTerminalContext: (selection: TerminalContextSelection) => void;
   focusRequestId: number;
+  interactive: boolean;
   autoFocus: boolean;
   resizeEpoch: number;
   drawerHeight: number;
@@ -267,6 +268,7 @@ export function TerminalViewport({
   onSessionExited,
   onAddTerminalContext,
   focusRequestId,
+  interactive,
   autoFocus,
   resizeEpoch,
   drawerHeight,
@@ -336,6 +338,8 @@ export function TerminalViewport({
   const terminalControl = terminalSession.control;
   const latestControlRef = useRef(terminalControl);
   latestControlRef.current = terminalControl;
+  const latestInteractiveRef = useRef(interactive);
+  latestInteractiveRef.current = interactive;
   const defaultClaimedTerminalRef = useRef<string | null>(null);
   const terminalControlKey = `${environmentId}:${threadId}:${terminalId}`;
   const claimTerminalControl = useEffectEvent((force: boolean) =>
@@ -396,7 +400,9 @@ export function TerminalViewport({
         theme: terminalThemeFromApp(mount),
         onData: (data) => handleData(data),
         onResize: (cols, rows) => {
-          if (latestControlRef.current === "controller") void resizeTerminal(cols, rows);
+          if (latestInteractiveRef.current && latestControlRef.current === "controller") {
+            void resizeTerminal(cols, rows);
+          }
         },
         onSelectionChange: () => handleSelectionChange(),
         onCopy: (text) => handleCopy(text),
@@ -528,7 +534,7 @@ export function TerminalViewport({
       };
 
       const sendTerminalInput = async (data: string, fallbackError: string) => {
-        if (latestControlRef.current !== "controller") return;
+        if (!latestInteractiveRef.current || latestControlRef.current !== "controller") return;
         const activeTerminal = terminalRef.current;
         if (!activeTerminal) return;
         const result = await writeTerminal(data);
@@ -631,7 +637,7 @@ export function TerminalViewport({
       }
 
       function handleData(data: string): void {
-        if (latestControlRef.current !== "controller") return;
+        if (!latestInteractiveRef.current || latestControlRef.current !== "controller") return;
         void (async () => {
           const result = await writeTerminal(data);
           if (result._tag === "Success" || isAtomCommandInterrupted(result)) return;
@@ -781,7 +787,7 @@ export function TerminalViewport({
   }, [autoFocus, terminalBuffer, terminalError, terminalStatus, terminalVersion]);
 
   useEffect(() => {
-    if (terminalVersion === 0) return;
+    if (!interactive || terminalVersion === 0) return;
     if (terminalStatus !== "running") {
       if (
         (terminalStatus === "closed" ||
@@ -798,15 +804,15 @@ export function TerminalViewport({
     if (terminalControl === "available") {
       void claimTerminalControl(false);
     }
-  }, [terminalControl, terminalControlKey, terminalStatus, terminalVersion]);
+  }, [interactive, terminalControl, terminalControlKey, terminalStatus, terminalVersion]);
 
   useEffect(() => {
-    if (terminalControl !== "controller") return;
+    if (!interactive || terminalControl !== "controller") return;
     const terminal = terminalRef.current;
     if (!terminal) return;
     const frame = window.requestAnimationFrame(() => terminal.fit());
     return () => window.cancelAnimationFrame(frame);
-  }, [terminalControl]);
+  }, [interactive, terminalControl]);
 
   useEffect(() => {
     if (!autoFocus) return;
@@ -1407,7 +1413,8 @@ export default function ThreadTerminalDrawer({
                           onSessionExited={() => onCloseTerminal(terminalId)}
                           onAddTerminalContext={onAddTerminalContext}
                           focusRequestId={focusRequestId}
-                          autoFocus={terminalId === resolvedActiveTerminalId}
+                          interactive={visible}
+                          autoFocus={visible && terminalId === resolvedActiveTerminalId}
                           resizeEpoch={resizeEpoch}
                           drawerHeight={drawerHeight}
                           keybindings={keybindings}
@@ -1435,7 +1442,8 @@ export default function ThreadTerminalDrawer({
                   onSessionExited={() => onCloseTerminal(resolvedActiveTerminalId)}
                   onAddTerminalContext={onAddTerminalContext}
                   focusRequestId={focusRequestId}
-                  autoFocus
+                  interactive={visible}
+                  autoFocus={visible}
                   resizeEpoch={resizeEpoch}
                   drawerHeight={drawerHeight}
                   keybindings={keybindings}

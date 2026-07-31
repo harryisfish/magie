@@ -624,7 +624,6 @@ const PersistentThreadTerminalDrawer = memo(function PersistentThreadTerminalDra
   onAddTerminalContext,
 }: PersistentThreadTerminalDrawerProps) {
   const openTerminal = useAtomCommand(terminalEnvironment.open, "terminal open");
-  const writeTerminal = useAtomCommand(terminalEnvironment.write, "terminal write");
   const closeTerminalMutation = useAtomCommand(terminalEnvironment.close, "terminal close");
   const draftThread = useComposerDraftStore((store) => store.getDraftThreadByRef(threadRef));
   const serverThread = useThread(threadRef, { waitForShell: draftThread !== null });
@@ -878,12 +877,6 @@ const PersistentThreadTerminalDrawer = memo(function PersistentThreadTerminalDra
 
   const closeTerminal = useCallback(
     (terminalId: string) => {
-      const fallbackExitWrite = () =>
-        writeTerminal({
-          environmentId: threadRef.environmentId,
-          input: { threadId, terminalId, data: "exit\n" },
-        });
-
       void (async () => {
         const closeResult = await closeTerminalMutation({
           environmentId: threadRef.environmentId,
@@ -893,22 +886,12 @@ const PersistentThreadTerminalDrawer = memo(function PersistentThreadTerminalDra
             deleteHistory: true,
           },
         });
-        if (closeResult._tag === "Failure" && !isAtomCommandInterrupted(closeResult)) {
-          await fallbackExitWrite();
-        }
+        if (closeResult._tag === "Failure") return;
+        storeCloseTerminal(threadRef, terminalId);
+        bumpFocusRequestId();
       })();
-
-      storeCloseTerminal(threadRef, terminalId);
-      bumpFocusRequestId();
     },
-    [
-      bumpFocusRequestId,
-      storeCloseTerminal,
-      threadId,
-      threadRef,
-      closeTerminalMutation,
-      writeTerminal,
-    ],
+    [bumpFocusRequestId, storeCloseTerminal, threadId, threadRef, closeTerminalMutation],
   );
 
   const handleAddTerminalContext = useCallback(
@@ -2763,11 +2746,6 @@ function ChatViewContent(props: ChatViewProps) {
   const closeTerminal = useCallback(
     (terminalId: string) => {
       if (!activeThreadId || !activeThreadRef) return;
-      const fallbackExitWrite = () =>
-        writeTerminal({
-          environmentId,
-          input: { threadId: activeThreadId, terminalId, data: "exit\n" },
-        });
       void (async () => {
         const closeResult = await closeTerminalMutation({
           environmentId,
@@ -2777,21 +2755,12 @@ function ChatViewContent(props: ChatViewProps) {
             deleteHistory: true,
           },
         });
-        if (closeResult._tag === "Failure" && !isAtomCommandInterrupted(closeResult)) {
-          await fallbackExitWrite();
-        }
+        if (closeResult._tag === "Failure") return;
+        storeCloseTerminal(activeThreadRef, terminalId);
+        setTerminalFocusRequestId((value) => value + 1);
       })();
-      storeCloseTerminal(activeThreadRef, terminalId);
-      setTerminalFocusRequestId((value) => value + 1);
     },
-    [
-      activeThreadId,
-      activeThreadRef,
-      closeTerminalMutation,
-      environmentId,
-      storeCloseTerminal,
-      writeTerminal,
-    ],
+    [activeThreadId, activeThreadRef, closeTerminalMutation, environmentId, storeCloseTerminal],
   );
   const runProjectScript = useCallback(
     async (
@@ -3268,15 +3237,18 @@ function ChatViewContent(props: ChatViewProps) {
   const closePanelTerminal = useCallback(
     (terminalId: string) => {
       if (!activeThreadRef || activeRightPanelSurface?.kind !== "terminal") return;
-      void closeTerminalMutation({
-        environmentId: activeThreadRef.environmentId,
-        input: { threadId: activeThreadRef.threadId, terminalId, deleteHistory: true },
-      });
-      storeCloseTerminal(activeThreadRef, terminalId);
-      useRightPanelStore
-        .getState()
-        .closeTerminal(activeThreadRef, activeRightPanelSurface.id, terminalId);
-      setTerminalFocusRequestId((value) => value + 1);
+      void (async () => {
+        const closeResult = await closeTerminalMutation({
+          environmentId: activeThreadRef.environmentId,
+          input: { threadId: activeThreadRef.threadId, terminalId, deleteHistory: true },
+        });
+        if (closeResult._tag === "Failure") return;
+        storeCloseTerminal(activeThreadRef, terminalId);
+        useRightPanelStore
+          .getState()
+          .closeTerminal(activeThreadRef, activeRightPanelSurface.id, terminalId);
+        setTerminalFocusRequestId((value) => value + 1);
+      })();
     },
     [activeRightPanelSurface, activeThreadRef, closeTerminalMutation, storeCloseTerminal],
   );
@@ -3320,8 +3292,36 @@ function ChatViewContent(props: ChatViewProps) {
     );
   }, [canMaximizeRightPanel, routeThreadKey]);
   const cleanupRightPanelSurfaces = useCallback(
-    (surfaces: readonly RightPanelSurface[]) => {
-      if (!activeThreadRef) return;
+    async (surfaces: readonly RightPanelSurface[]) => {
+      if (!activeThreadRef) return false;
+      const terminalTargets = surfaces.flatMap((surface) =>
+        surface.kind === "terminal"
+          ? surface.terminalIds.map((terminalId) => ({ surfaceId: surface.id, terminalId }))
+          : [],
+      );
+      const closeResults = await Promise.all(
+        terminalTargets.map(({ terminalId }) =>
+          closeTerminalMutation({
+            environmentId: activeThreadRef.environmentId,
+            input: { threadId: activeThreadRef.threadId, terminalId, deleteHistory: true },
+          }),
+        ),
+      );
+      let allTerminalClosesSucceeded = true;
+      for (const [index, result] of closeResults.entries()) {
+        const target = terminalTargets[index];
+        if (!target) continue;
+        if (result._tag === "Failure") {
+          allTerminalClosesSucceeded = false;
+          continue;
+        }
+        storeCloseTerminal(activeThreadRef, target.terminalId);
+        useRightPanelStore
+          .getState()
+          .closeTerminal(activeThreadRef, target.surfaceId, target.terminalId);
+      }
+      if (!allTerminalClosesSucceeded) return false;
+
       if (surfaces.some((surface) => surface.kind === "plan")) {
         dismissPlanSidebarForCurrentTurn();
       }
@@ -3335,16 +3335,8 @@ function ChatViewContent(props: ChatViewProps) {
             threadRef: activeThreadRef,
           });
         }
-        if (surface.kind === "terminal") {
-          for (const terminalId of surface.terminalIds) {
-            storeCloseTerminal(activeThreadRef, terminalId);
-            void closeTerminalMutation({
-              environmentId: activeThreadRef.environmentId,
-              input: { threadId: activeThreadRef.threadId, terminalId, deleteHistory: true },
-            });
-          }
-        }
       }
+      return true;
     },
     [
       activeThreadRef,
@@ -3365,29 +3357,35 @@ function ChatViewContent(props: ChatViewProps) {
       setActivePreviewTab(activeThreadRef, nextActiveSurface.resourceId);
     }
   }, [activeThreadRef]);
-  const closeRightPanelSurface = useCallback(
-    (surface: RightPanelSurface) => {
+  const closeRightPanelSurfaces = useCallback(
+    (surfaces: readonly RightPanelSurface[]) => {
       if (!activeThreadRef) return;
-      cleanupRightPanelSurfaces([surface]);
-      useRightPanelStore.getState().closeSurface(activeThreadRef, surface.id);
-      syncActivePreviewSurface();
+      void (async () => {
+        if (!(await cleanupRightPanelSurfaces(surfaces))) return;
+        const store = useRightPanelStore.getState();
+        for (const surface of surfaces) {
+          if (surface.kind !== "terminal") {
+            store.closeSurface(activeThreadRef, surface.id);
+          }
+        }
+        syncActivePreviewSurface();
+      })();
     },
     [activeThreadRef, cleanupRightPanelSurfaces, syncActivePreviewSurface],
+  );
+  const closeRightPanelSurface = useCallback(
+    (surface: RightPanelSurface) => {
+      closeRightPanelSurfaces([surface]);
+    },
+    [closeRightPanelSurfaces],
   );
   const closeOtherRightPanelSurfaces = useCallback(
     (surface: RightPanelSurface) => {
       if (!activeThreadRef) return;
       const surfaces = rightPanelState.surfaces.filter((entry) => entry.id !== surface.id);
-      cleanupRightPanelSurfaces(surfaces);
-      useRightPanelStore.getState().closeOtherSurfaces(activeThreadRef, surface.id);
-      syncActivePreviewSurface();
+      closeRightPanelSurfaces(surfaces);
     },
-    [
-      activeThreadRef,
-      cleanupRightPanelSurfaces,
-      rightPanelState.surfaces,
-      syncActivePreviewSurface,
-    ],
+    [activeThreadRef, closeRightPanelSurfaces, rightPanelState.surfaces],
   );
   const closeRightPanelSurfacesToRight = useCallback(
     (surface: RightPanelSurface) => {
@@ -3395,22 +3393,13 @@ function ChatViewContent(props: ChatViewProps) {
       const surfaceIndex = rightPanelState.surfaces.findIndex((entry) => entry.id === surface.id);
       if (surfaceIndex < 0) return;
       const surfaces = rightPanelState.surfaces.slice(surfaceIndex + 1);
-      cleanupRightPanelSurfaces(surfaces);
-      useRightPanelStore.getState().closeSurfacesToRight(activeThreadRef, surface.id);
-      syncActivePreviewSurface();
+      closeRightPanelSurfaces(surfaces);
     },
-    [
-      activeThreadRef,
-      cleanupRightPanelSurfaces,
-      rightPanelState.surfaces,
-      syncActivePreviewSurface,
-    ],
+    [activeThreadRef, closeRightPanelSurfaces, rightPanelState.surfaces],
   );
   const closeAllRightPanelSurfaces = useCallback(() => {
-    if (!activeThreadRef) return;
-    cleanupRightPanelSurfaces(rightPanelState.surfaces);
-    useRightPanelStore.getState().closeAllSurfaces(activeThreadRef);
-  }, [activeThreadRef, cleanupRightPanelSurfaces, rightPanelState.surfaces]);
+    closeRightPanelSurfaces(rightPanelState.surfaces);
+  }, [closeRightPanelSurfaces, rightPanelState.surfaces]);
   const copyRightPanelFilePath = useCallback((relativePath: string) => {
     if (typeof window === "undefined" || !navigator.clipboard?.writeText) {
       toastManager.add(

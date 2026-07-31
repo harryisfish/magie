@@ -122,9 +122,9 @@ A point-in-time view of state. The word is used in multiple layers, including or
 #### Terminal controller
 
 The authenticated client session currently allowed to send input and resize one live Terminal.
-Other attached clients are observers: they receive the same snapshot and output but cannot send
-input or resize the PTY until they claim control. An unowned Terminal is `available`. See
-[remote.md][25].
+Other attached clients are observers: they receive the same snapshot and output but cannot mutate
+the controlled Terminal session or its retained history until they claim control. An unowned Terminal
+is `available`. See [remote.md][25].
 
 ### Checkpointing
 

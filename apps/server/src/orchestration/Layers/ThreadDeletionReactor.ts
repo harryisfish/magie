@@ -50,7 +50,7 @@ const make = Effect.gen(function* () {
 
   const closeThreadTerminals = (threadId: ThreadDeletedEvent["payload"]["threadId"]) =>
     logCleanupCauseUnlessInterrupted({
-      effect: terminalManager.close({ threadId, deleteHistory: true }),
+      effect: terminalManager.close({ threadId, deleteHistory: true }, null),
       message: "thread deletion cleanup skipped terminal close",
       threadId,
     });

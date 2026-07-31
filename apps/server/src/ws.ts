@@ -1055,7 +1055,7 @@ const makeWsRpcLayer = (
                   );
                 }
 
-                yield* terminalManager.close({ threadId: normalizedCommand.threadId }).pipe(
+                yield* terminalManager.close({ threadId: normalizedCommand.threadId }, null).pipe(
                   Effect.catch((error) =>
                     Effect.logWarning("failed to close thread terminals after archive", {
                       threadId: normalizedCommand.threadId,
@@ -1877,17 +1877,29 @@ const makeWsRpcLayer = (
             },
           ),
         [WS_METHODS.terminalClear]: (input) =>
-          observeRpcEffect(WS_METHODS.terminalClear, terminalManager.clear(input), {
-            "rpc.aggregate": "terminal",
-          }),
+          observeRpcEffect(
+            WS_METHODS.terminalClear,
+            terminalManager.clear(input, currentSessionId),
+            {
+              "rpc.aggregate": "terminal",
+            },
+          ),
         [WS_METHODS.terminalRestart]: (input) =>
-          observeRpcEffect(WS_METHODS.terminalRestart, terminalManager.restart(input), {
-            "rpc.aggregate": "terminal",
-          }),
+          observeRpcEffect(
+            WS_METHODS.terminalRestart,
+            terminalManager.restart(input, currentSessionId),
+            {
+              "rpc.aggregate": "terminal",
+            },
+          ),
         [WS_METHODS.terminalClose]: (input) =>
-          observeRpcEffect(WS_METHODS.terminalClose, terminalManager.close(input), {
-            "rpc.aggregate": "terminal",
-          }),
+          observeRpcEffect(
+            WS_METHODS.terminalClose,
+            terminalManager.close(input, currentSessionId),
+            {
+              "rpc.aggregate": "terminal",
+            },
+          ),
         [WS_METHODS.subscribeTerminalEvents]: (_input) =>
           observeRpcStream(
             WS_METHODS.subscribeTerminalEvents,

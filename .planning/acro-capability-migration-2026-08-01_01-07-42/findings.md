@@ -34,8 +34,12 @@
 - `EnvironmentSupervisor.prepared` 现在由 Web/Desktop 与 Mobile 设置行消费；连接到 fallback 时展示实际 active endpoint，Showcase 不再绕过 cosmetic 投影泄露真实地址。
 - `releaseSessionControls` 在每个 Terminal 的 thread lock 内再次核对 owner，迟到的旧 owner release 不会覆盖新 controller。
 - `SessionStore.markDisconnected` 在连接生命周期锁内执行最后断开 callback；同 Auth Session 重连必须等释放完成，避免清理新连接刚取得的控制权。
-- Acro 的已验证语义是“静默默认 claim 只能拿无主会话，force takeover 必须来自遮罩按钮”；因此 Magie 可在首次 attach hydration 后对 `available` 发一次非 force claim，但后续 owner 释放时不应让所有 observer 自动竞抢，observer / available 都需保留显式 Take control 入口。
+- Acro 的已验证语义是“静默默认 claim 只能拿无主会话，force takeover 必须来自遮罩按钮”；因此 Magie 只允许 visible Web drawer 或 focused Mobile route 在首次 attach hydration 后对 `available` 发一次非 force claim，hidden / unfocused observer 不竞抢，observer / available 都保留显式 Take control 入口。
 - `ProjectSetupScriptRunner` 是真实的服务端内部 Terminal writer。若用永久 pseudo Auth Session 兼容旧调用，它会留下无法由 WebSocket 生命周期释放的 owner；正确最小边界是让内部 writer 显式走 trusted `null` caller，而所有 RPC write / resize 都必须携带真实 Auth Session 并先 claim。
+- `clear` / `restart` / `close` 与 process-starting / size-changing `open` 属于 lifecycle mutation：无 controller 时允许当前调用者执行；已有 controller 时只允许该 Session，即使 process 已退出但 session / history 仍保留。archive / thread deletion cleanup 显式使用 trusted `null`。
+- thread-wide close 在关闭任何 session 前先验证全部目标，因此 ownership 拒绝不会产生部分关闭；它不承诺对运行时 I/O defect 或 fiber interruption 做事务回滚。
+- Web drawer、当前 Thread、单个 Right Panel terminal 及批量 surface close 都按 close RPC 结果收敛本地状态；Terminal surface 只按调用时捕获的 terminal ID 逐项移除，失败项与等待期间新增 split 保留；非 Terminal surface 才按捕获的 surface ID 收口。
+- WebSocket route seam 已断言 `clear` / `restart` / `close` 收到非空真实 Auth Session；archive seam 断言内部 cleanup 传 `null`。
 - 连接预算已下沉为每 endpoint 15 秒，Supervisor watchdog 覆盖最多 8 个候选；首入口卡住仍可在同一 attempt 轮换。
 - endpoint 轮换使用严格 allowlist：仅 `network`、`timeout`、`transport`、`endpoint-unavailable`；`remote-unavailable` / `relay-unavailable` 回到 Supervisor backoff。
 - WebSocket 初始 `server.getConfig` 会再次核对 Environment ID；HTTP 与 WS 指向不同 Server 时 fail closed。
@@ -57,6 +61,7 @@
 - 控制权是 Server 进程内临时状态；Server 重启后会清空，与当前 PTY 生命周期一致。
 - Auth Session 是设备级近似；同一浏览器会话的多个窗口共享控制权，符合“同设备连接不互相抢占”的目标。
 - Web/Desktop 与 Mobile 已复用共享 onboarding 编辑保存远端 URL；UI 不复制连接轮换逻辑。
+- Hidden / unfocused claim、Mobile exited → running 后尺寸补报与 close 结果本地收敛目前由源码审计、focused smoke tests 和 typecheck 证明；未授权浏览器或模拟器验收，因此不宣称已完成视觉/交互验收。
 - Fork 继承上游发布 workflow；本轮只 push feature branch，不打 tag、不合并 main、不触发任何生产发布。
 
 ## 参考指针
