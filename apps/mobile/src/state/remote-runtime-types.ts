@@ -12,6 +12,7 @@ export interface ConnectedEnvironmentSummary {
   readonly environmentId: EnvironmentId;
   readonly environmentLabel: string;
   readonly displayUrl: string;
+  readonly displayUrls: ReadonlyArray<string>;
   readonly isRelayManaged: boolean;
   readonly connectionState: EnvironmentConnectionPhase;
   readonly connectionError: string | null;

@@ -14,6 +14,7 @@ import {
 } from "react-native-keyboard-controller";
 
 import { AndroidHeaderIconButton, AndroidScreenHeader } from "../../components/AndroidScreenHeader";
+import { AppText as Text } from "../../components/AppText";
 import {
   ComposerToolbarButton,
   ComposerToolbarRow,
@@ -162,6 +163,10 @@ export function ThreadTerminalRouteScreen(props: ThreadTerminalRouteScreenProps)
   const navigation = useNavigation();
   const writeTerminal = useAtomCommand(terminalEnvironment.write, "terminal write");
   const resizeTerminal = useAtomCommand(terminalEnvironment.resize, "terminal resize");
+  const claimTerminalControl = useAtomCommand(
+    terminalEnvironment.claimControl,
+    "terminal claim control",
+  );
   const clearTerminal = useAtomCommand(terminalEnvironment.clear, "terminal clear");
   const closeTerminal = useAtomCommand(terminalEnvironment.close, "terminal close");
   const openTerminal = useAtomCommand(terminalEnvironment.open, "terminal open");
@@ -254,6 +259,7 @@ export function ThreadTerminalRouteScreen(props: ThreadTerminalRouteScreenProps)
   const firstNonEmptyBufferLoggedRef = useRef(false);
   const lastBufferReplayKeyRef = useRef<string | null>(null);
   const sentInitialInputKeyRef = useRef<string | null>(null);
+  const defaultClaimedTerminalRef = useRef<string | null>(null);
   const [readyBufferReplayKey, setReadyBufferReplayKey] = useState<string | null>(null);
   /** Default grid is always valid for attach; onResize refines cols/rows. Requiring a cached size blocked bootstrap for new terminal routes. */
   const [hasMeasuredSurface, setHasMeasuredSurface] = useState(true);
@@ -336,6 +342,7 @@ export function ThreadTerminalRouteScreen(props: ThreadTerminalRouteScreenProps)
     environmentId: selectedThread?.environmentId ?? null,
     terminal: terminalAttachInput,
   });
+  const previousTerminalControlRef = useRef(terminal.control);
   const terminalKey = selectedThread
     ? `${selectedThread.environmentId}:${selectedThread.id}:${terminalId}`
     : terminalId;
@@ -352,6 +359,41 @@ export function ThreadTerminalRouteScreen(props: ThreadTerminalRouteScreenProps)
     readyReplayKey: readyBufferReplayKey,
   });
   const isRunning = terminal.status === "running" || terminal.status === "starting";
+  const isController = terminal.control === "controller";
+
+  useEffect(() => {
+    if (terminal.version === 0) return;
+    if (terminal.status !== "running") {
+      if (
+        (terminal.status === "closed" ||
+          terminal.status === "exited" ||
+          terminal.status === "error") &&
+        defaultClaimedTerminalRef.current === terminalKey
+      ) {
+        defaultClaimedTerminalRef.current = null;
+      }
+      return;
+    }
+    if (defaultClaimedTerminalRef.current === terminalKey) return;
+    defaultClaimedTerminalRef.current = terminalKey;
+    if (!selectedThread || terminal.control !== "available") return;
+    void claimTerminalControl({
+      environmentId: selectedThread.environmentId,
+      input: {
+        threadId: selectedThread.id,
+        terminalId,
+        force: false,
+      },
+    });
+  }, [
+    claimTerminalControl,
+    selectedThread,
+    terminal.control,
+    terminal.status,
+    terminal.version,
+    terminalId,
+    terminalKey,
+  ]);
 
   // When the process ends while this screen is attached (e.g. typing `exit`),
   // close the session and leave the screen, mirroring the web drawer's
@@ -610,6 +652,7 @@ export function ThreadTerminalRouteScreen(props: ThreadTerminalRouteScreenProps)
       !initialInput ||
       !selectedThread ||
       terminal.version === 0 ||
+      !isController ||
       sentInitialInputKeyRef.current === launchTargetKey
     ) {
       return;
@@ -626,6 +669,7 @@ export function ThreadTerminalRouteScreen(props: ThreadTerminalRouteScreenProps)
   }, [
     launchTargetKey,
     pendingLaunch?.initialInput,
+    isController,
     selectedThread,
     terminal.version,
     terminalId,
@@ -694,7 +738,7 @@ export function ThreadTerminalRouteScreen(props: ThreadTerminalRouteScreenProps)
 
   const writeInput = useCallback(
     (data: string) => {
-      if (!selectedThread || !isRunning) {
+      if (!selectedThread || !isRunning || !isController) {
         return;
       }
 
@@ -707,7 +751,7 @@ export function ThreadTerminalRouteScreen(props: ThreadTerminalRouteScreenProps)
         },
       });
     },
-    [isRunning, selectedThread, terminalId, writeTerminal],
+    [isController, isRunning, selectedThread, terminalId, writeTerminal],
   );
 
   const handleInput = useCallback(
@@ -755,7 +799,7 @@ export function ThreadTerminalRouteScreen(props: ThreadTerminalRouteScreenProps)
       }
 
       setLastGridSize(size);
-      if (!selectedThread || !isRunning) {
+      if (!selectedThread || !isRunning || !isController) {
         return;
       }
 
@@ -771,6 +815,7 @@ export function ThreadTerminalRouteScreen(props: ThreadTerminalRouteScreenProps)
     },
     [
       isRunning,
+      isController,
       lastGridSize.cols,
       lastGridSize.rows,
       bufferReplayKey,
@@ -784,6 +829,30 @@ export function ThreadTerminalRouteScreen(props: ThreadTerminalRouteScreenProps)
       terminalKey,
     ],
   );
+
+  useEffect(() => {
+    const becameController = previousTerminalControlRef.current !== "controller" && isController;
+    previousTerminalControlRef.current = terminal.control;
+    if (!selectedThread || !isRunning || !becameController) return;
+    void resizeTerminal({
+      environmentId: selectedThread.environmentId,
+      input: {
+        threadId: selectedThread.id,
+        terminalId,
+        cols: lastGridSize.cols,
+        rows: lastGridSize.rows,
+      },
+    });
+  }, [
+    isController,
+    isRunning,
+    lastGridSize.cols,
+    lastGridSize.rows,
+    resizeTerminal,
+    selectedThread,
+    terminal.control,
+    terminalId,
+  ]);
 
   const handleSelectTerminal = useCallback(
     (nextTerminalId: string) => {
@@ -990,7 +1059,7 @@ export function ThreadTerminalRouteScreen(props: ThreadTerminalRouteScreenProps)
   );
 
   const handleClearTerminal = useCallback(() => {
-    if (!selectedThread) {
+    if (!selectedThread || !isController) {
       return;
     }
 
@@ -1002,10 +1071,11 @@ export function ThreadTerminalRouteScreen(props: ThreadTerminalRouteScreenProps)
         terminalId,
       },
     });
-  }, [clearTerminal, selectedThread, terminalId]);
+  }, [clearTerminal, isController, selectedThread, terminalId]);
 
   const handleToolbarActionPress = useCallback(
     (action: TerminalToolbarAction) => {
+      if (!isController) return;
       if (action.kind === "modifier") {
         setPendingModifierState((current) => ({
           terminalId,
@@ -1031,7 +1101,7 @@ export function ThreadTerminalRouteScreen(props: ThreadTerminalRouteScreenProps)
         writeInput(action.data);
       }
     },
-    [handleClearTerminal, pendingModifier, terminalId, writeInput],
+    [handleClearTerminal, isController, pendingModifier, terminalId, writeInput],
   );
 
   const handleDismissKeyboard = useCallback(() => {
@@ -1229,6 +1299,41 @@ export function ThreadTerminalRouteScreen(props: ThreadTerminalRouteScreenProps)
                 style={{ flex: 1 }}
                 terminalKey={terminalKey}
               />
+              {isRunning && terminal.version > 0 && !isController ? (
+                <View className="absolute inset-0 items-center justify-center bg-black/55 px-8">
+                  <View className="w-full max-w-sm items-center gap-3 rounded-[18px] border border-white/10 bg-neutral-950/95 px-5 py-5">
+                    <Text className="text-center text-sm font-t3-bold text-neutral-100">
+                      {terminal.control === "observer"
+                        ? "Another client is controlling this terminal"
+                        : "This terminal is ready to control"}
+                    </Text>
+                    <Text className="text-center text-xs leading-normal text-neutral-400">
+                      {terminal.control === "observer"
+                        ? "Output stays live. Take control to type or resize."
+                        : "Take control to type or resize."}
+                    </Text>
+                    <Pressable
+                      className="min-h-[42px] items-center justify-center rounded-[14px] bg-white px-5 active:opacity-80"
+                      onPress={() =>
+                        selectedThread
+                          ? void claimTerminalControl({
+                              environmentId: selectedThread.environmentId,
+                              input: {
+                                threadId: selectedThread.id,
+                                terminalId,
+                                force: terminal.control === "observer",
+                              },
+                            })
+                          : undefined
+                      }
+                    >
+                      <Text className="text-xs font-t3-bold tracking-[0.8px] uppercase text-black">
+                        Take control
+                      </Text>
+                    </Pressable>
+                  </View>
+                </View>
+              ) : null}
             </View>
 
             {isAccessoryVisible ? (

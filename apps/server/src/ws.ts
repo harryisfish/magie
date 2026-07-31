@@ -1836,7 +1836,7 @@ const makeWsRpcLayer = (
             "rpc.aggregate": "review",
           }),
         [WS_METHODS.terminalOpen]: (input) =>
-          observeRpcEffect(WS_METHODS.terminalOpen, terminalManager.open(input), {
+          observeRpcEffect(WS_METHODS.terminalOpen, terminalManager.open(input, currentSessionId), {
             "rpc.aggregate": "terminal",
           }),
         [WS_METHODS.terminalAttach]: (input) =>
@@ -1844,20 +1844,38 @@ const makeWsRpcLayer = (
             WS_METHODS.terminalAttach,
             Stream.callback<TerminalAttachStreamEvent, TerminalError>((queue) =>
               Effect.acquireRelease(
-                terminalManager.attachStream(input, (event) => Queue.offer(queue, event)),
+                terminalManager.attachStream(
+                  input,
+                  (event) => Queue.offer(queue, event),
+                  currentSessionId,
+                ),
                 (unsubscribe) => Effect.sync(unsubscribe),
               ),
             ),
             { "rpc.aggregate": "terminal" },
           ),
+        [WS_METHODS.terminalClaimControl]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.terminalClaimControl,
+            terminalManager.claimControl(input, currentSessionId),
+            { "rpc.aggregate": "terminal" },
+          ),
         [WS_METHODS.terminalWrite]: (input) =>
-          observeRpcEffect(WS_METHODS.terminalWrite, terminalManager.write(input), {
-            "rpc.aggregate": "terminal",
-          }),
+          observeRpcEffect(
+            WS_METHODS.terminalWrite,
+            terminalManager.write(input, currentSessionId),
+            {
+              "rpc.aggregate": "terminal",
+            },
+          ),
         [WS_METHODS.terminalResize]: (input) =>
-          observeRpcEffect(WS_METHODS.terminalResize, terminalManager.resize(input), {
-            "rpc.aggregate": "terminal",
-          }),
+          observeRpcEffect(
+            WS_METHODS.terminalResize,
+            terminalManager.resize(input, currentSessionId),
+            {
+              "rpc.aggregate": "terminal",
+            },
+          ),
         [WS_METHODS.terminalClear]: (input) =>
           observeRpcEffect(WS_METHODS.terminalClear, terminalManager.clear(input), {
             "rpc.aggregate": "terminal",
@@ -2090,6 +2108,7 @@ export const websocketRpcRouteLayer = Layer.unwrap(
   Effect.gen(function* () {
     const previewAutomationBroker = yield* PreviewAutomationBroker.PreviewAutomationBroker;
     const serverSelfUpdate = yield* ServerSelfUpdate.ServerSelfUpdate;
+    const terminalManager = yield* TerminalManager.TerminalManager;
     return HttpRouter.add(
       "GET",
       "/ws",
@@ -2140,7 +2159,11 @@ export const websocketRpcRouteLayer = Layer.unwrap(
         return yield* Effect.acquireUseRelease(
           sessions.markConnected(session.sessionId),
           () => rpcWebSocketHttpEffect,
-          () => sessions.markDisconnected(session.sessionId),
+          () =>
+            sessions.markDisconnected(
+              session.sessionId,
+              terminalManager.releaseSessionControls(session.sessionId),
+            ),
         );
       }).pipe(
         Effect.catchTags({

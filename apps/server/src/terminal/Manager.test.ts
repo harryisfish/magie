@@ -1,6 +1,7 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import {
+  AuthSessionId,
   DEFAULT_TERMINAL_ID,
   type TerminalAttachStreamEvent,
   type TerminalEvent,
@@ -10,6 +11,7 @@ import {
 } from "@t3tools/contracts";
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import * as Data from "effect/Data";
+import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Encoding from "effect/Encoding";
@@ -215,11 +217,36 @@ interface CreateManagerOptions {
   ptyAdapter?: FakePtyAdapter;
 }
 
+const TEST_VIEWER_SESSION_ID = AuthSessionId.make("terminal-test-viewer");
+
+function testTerminalManager(manager: TerminalManager.TerminalManager["Service"]) {
+  return {
+    ...manager,
+    open: (
+      input: Parameters<TerminalManager.TerminalManager["Service"]["open"]>[0],
+      controllerSessionId: AuthSessionId | null = null,
+    ) => manager.open(input, controllerSessionId),
+    attachStream: (
+      input: Parameters<TerminalManager.TerminalManager["Service"]["attachStream"]>[0],
+      listener: Parameters<TerminalManager.TerminalManager["Service"]["attachStream"]>[1],
+      viewerSessionId: AuthSessionId = TEST_VIEWER_SESSION_ID,
+    ) => manager.attachStream(input, listener, viewerSessionId),
+    write: (
+      input: Parameters<TerminalManager.TerminalManager["Service"]["write"]>[0],
+      controllerSessionId: AuthSessionId | null = null,
+    ) => manager.write(input, controllerSessionId),
+    resize: (
+      input: Parameters<TerminalManager.TerminalManager["Service"]["resize"]>[0],
+      controllerSessionId: AuthSessionId | null = null,
+    ) => manager.resize(input, controllerSessionId),
+  };
+}
+
 interface ManagerFixture {
   readonly baseDir: string;
   readonly logsDir: string;
   readonly ptyAdapter: FakePtyAdapter;
-  readonly manager: TerminalManager.TerminalManager["Service"];
+  readonly manager: ReturnType<typeof testTerminalManager>;
   readonly getEvents: Effect.Effect<ReadonlyArray<TerminalEvent>>;
 }
 
@@ -266,7 +293,7 @@ const createManager = (
         logsDir,
         join,
         ptyAdapter,
-        manager,
+        manager: testTerminalManager(manager),
         getEvents: Ref.get(eventsRef),
       };
     }),
@@ -539,6 +566,205 @@ it.layer(
       expect(process.writes).toEqual(["ls\n"]);
       expect(process.resizeCalls).toEqual([{ cols: 120, rows: 30 }]);
     }),
+  );
+
+  it.effect("enforces controller-only writes, resizes, and running-session opens", () =>
+    Effect.gen(function* () {
+      const { manager, ptyAdapter } = yield* createManager();
+      const firstController = AuthSessionId.make("terminal-controller-1");
+      const secondController = AuthSessionId.make("terminal-controller-2");
+      yield* manager.open(openInput(), null);
+      yield* manager.claimControl(
+        { threadId: "thread-1", terminalId: DEFAULT_TERMINAL_ID, force: false },
+        firstController,
+      );
+      const process = ptyAdapter.processes[0];
+      expect(process).toBeDefined();
+      if (!process) return;
+
+      yield* manager.write(
+        { threadId: "thread-1", terminalId: DEFAULT_TERMINAL_ID, data: "first\n" },
+        firstController,
+      );
+      yield* manager.resize(
+        { threadId: "thread-1", terminalId: DEFAULT_TERMINAL_ID, cols: 120, rows: 30 },
+        firstController,
+      );
+
+      expect(
+        yield* Effect.flip(
+          manager.write(
+            { threadId: "thread-1", terminalId: DEFAULT_TERMINAL_ID, data: "blocked\n" },
+            secondController,
+          ),
+        ),
+      ).toMatchObject({ _tag: "TerminalControlError" });
+      expect(
+        yield* Effect.flip(
+          manager.resize(
+            { threadId: "thread-1", terminalId: DEFAULT_TERMINAL_ID, cols: 130, rows: 35 },
+            secondController,
+          ),
+        ),
+      ).toMatchObject({ _tag: "TerminalControlError" });
+
+      yield* manager.open(openInput({ cols: 130, rows: 35 }), secondController);
+      expect(process.resizeCalls).toEqual([{ cols: 120, rows: 30 }]);
+
+      yield* manager.claimControl(
+        { threadId: "thread-1", terminalId: DEFAULT_TERMINAL_ID, force: true },
+        secondController,
+      );
+      yield* manager.write(
+        { threadId: "thread-1", terminalId: DEFAULT_TERMINAL_ID, data: "second\n" },
+        secondController,
+      );
+      yield* manager.resize(
+        { threadId: "thread-1", terminalId: DEFAULT_TERMINAL_ID, cols: 140, rows: 40 },
+        secondController,
+      );
+
+      expect(
+        yield* Effect.flip(
+          manager.write(
+            { threadId: "thread-1", terminalId: DEFAULT_TERMINAL_ID, data: "stale\n" },
+            firstController,
+          ),
+        ),
+      ).toMatchObject({ _tag: "TerminalControlError" });
+      expect(process.writes).toEqual(["first\n", "second\n"]);
+      expect(process.resizeCalls).toEqual([
+        { cols: 120, rows: 30 },
+        { cols: 140, rows: 40 },
+      ]);
+    }),
+  );
+
+  it.effect(
+    "fans out one terminal, preserves control across reopen, and releases disconnected control",
+    () =>
+      Effect.gen(function* () {
+        const { manager, ptyAdapter } = yield* createManager();
+        const firstViewer = AuthSessionId.make("terminal-viewer-1");
+        const secondViewer = AuthSessionId.make("terminal-viewer-2");
+        yield* manager.open(openInput(), null);
+        const firstEvents = yield* Ref.make<ReadonlyArray<TerminalAttachStreamEvent>>([]);
+        const secondEvents = yield* Ref.make<ReadonlyArray<TerminalAttachStreamEvent>>([]);
+        const firstOutput = yield* Deferred.make<void>();
+        const secondOutput = yield* Deferred.make<void>();
+        const subscribe = (
+          events: Ref.Ref<ReadonlyArray<TerminalAttachStreamEvent>>,
+          output: Deferred.Deferred<void>,
+          viewerSessionId: AuthSessionId,
+        ) =>
+          manager.attachStream(
+            openInput(),
+            (event) =>
+              Ref.update(events, (current) => [...current, event]).pipe(
+                Effect.andThen(
+                  event.type === "output" ? Deferred.succeed(output, undefined) : Effect.void,
+                ),
+                Effect.asVoid,
+              ),
+            viewerSessionId,
+          );
+        const unsubscribeFirst = yield* subscribe(firstEvents, firstOutput, firstViewer);
+        const unsubscribeSecond = yield* subscribe(secondEvents, secondOutput, secondViewer);
+        yield* Effect.addFinalizer(() =>
+          Effect.sync(() => {
+            unsubscribeFirst();
+            unsubscribeSecond();
+          }),
+        );
+
+        expect(yield* Ref.get(firstEvents)).toMatchObject([
+          { type: "snapshot", control: "available" },
+        ]);
+        expect(yield* Ref.get(secondEvents)).toMatchObject([
+          { type: "snapshot", control: "available" },
+        ]);
+
+        yield* manager.claimControl(
+          { threadId: "thread-1", terminalId: DEFAULT_TERMINAL_ID, force: false },
+          firstViewer,
+        );
+        expect((yield* Ref.get(firstEvents)).at(-1)).toMatchObject({
+          type: "control",
+          control: "controller",
+        });
+        expect((yield* Ref.get(secondEvents)).at(-1)).toMatchObject({
+          type: "control",
+          control: "observer",
+        });
+
+        const process = ptyAdapter.processes[0];
+        expect(process).toBeDefined();
+        if (!process) return;
+        process.emitData("shared output\n");
+        yield* Effect.all([Deferred.await(firstOutput), Deferred.await(secondOutput)], {
+          concurrency: "unbounded",
+        });
+        expect(yield* Ref.get(firstEvents)).toContainEqual(
+          expect.objectContaining({ type: "output", data: "shared output\n" }),
+        );
+        expect(yield* Ref.get(secondEvents)).toContainEqual(
+          expect.objectContaining({ type: "output", data: "shared output\n" }),
+        );
+
+        process.emitExit({ exitCode: 0, signal: 0 });
+        yield* waitFor(
+          Effect.map(
+            Effect.all([Ref.get(firstEvents), Ref.get(secondEvents)]),
+            ([first, second]) =>
+              first.some((event) => event.type === "exited") &&
+              second.some((event) => event.type === "exited"),
+          ),
+          "1200 millis",
+        );
+        yield* manager.open(openInput(), firstViewer);
+
+        const firstReopened = (yield* Ref.get(firstEvents))
+          .filter((event) => event.type === "snapshot")
+          .at(-1);
+        const secondReopened = (yield* Ref.get(secondEvents))
+          .filter((event) => event.type === "snapshot")
+          .at(-1);
+        expect(firstReopened).toMatchObject({ control: "controller" });
+        expect(secondReopened).toMatchObject({ control: "observer" });
+
+        yield* manager.claimControl(
+          { threadId: "thread-1", terminalId: DEFAULT_TERMINAL_ID, force: true },
+          secondViewer,
+        );
+        expect((yield* Ref.get(firstEvents)).at(-1)).toMatchObject({
+          type: "control",
+          control: "observer",
+        });
+        expect((yield* Ref.get(secondEvents)).at(-1)).toMatchObject({
+          type: "control",
+          control: "controller",
+        });
+
+        yield* manager.releaseSessionControls(firstViewer);
+        expect((yield* Ref.get(firstEvents)).at(-1)).toMatchObject({ control: "observer" });
+        expect((yield* Ref.get(secondEvents)).at(-1)).toMatchObject({ control: "controller" });
+
+        yield* manager.releaseSessionControls(secondViewer);
+        expect((yield* Ref.get(firstEvents)).at(-1)).toMatchObject({
+          type: "control",
+          control: "available",
+        });
+        expect((yield* Ref.get(secondEvents)).at(-1)).toMatchObject({
+          type: "control",
+          control: "available",
+        });
+        expect(
+          yield* manager.claimControl(
+            { threadId: "thread-1", terminalId: DEFAULT_TERMINAL_ID, force: false },
+            firstViewer,
+          ),
+        ).toMatchObject({ control: "controller" });
+      }),
   );
 
   it.effect("preserves structured context and causes for PTY I/O failures", () =>

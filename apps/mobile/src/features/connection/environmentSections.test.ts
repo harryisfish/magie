@@ -10,10 +10,12 @@ function connectedEnvironment(
     readonly isRelayManaged: boolean;
   },
 ): ConnectedEnvironmentSummary {
+  const displayUrl = input.displayUrl ?? `https://${input.environmentId}.example.test/`;
   return {
     environmentId: EnvironmentId.make(input.environmentId),
     environmentLabel: input.environmentLabel ?? input.environmentId,
-    displayUrl: input.displayUrl ?? `https://${input.environmentId}.example.test/`,
+    displayUrl,
+    displayUrls: input.displayUrls ?? [displayUrl],
     isRelayManaged: input.isRelayManaged,
     connectionState: input.connectionState ?? "connected",
     connectionError: input.connectionError ?? null,

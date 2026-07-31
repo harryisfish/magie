@@ -14,7 +14,7 @@ import * as Stream from "effect/Stream";
 import * as SubscriptionRef from "effect/SubscriptionRef";
 import * as Tracer from "effect/Tracer";
 
-import type { ConnectionCatalogEntry } from "./catalog.ts";
+import { MAX_BEARER_CONNECTION_ENDPOINTS, type ConnectionCatalogEntry } from "./catalog.ts";
 import * as Connectivity from "./connectivity.ts";
 import * as ConnectionDriver from "./driver.ts";
 import {
@@ -30,7 +30,8 @@ import { safeErrorLogAttributes } from "../errors/safeLog.ts";
 import * as ConnectionWakeups from "./wakeups.ts";
 
 const RETRY_DELAYS_MS = [1_000, 2_000, 4_000, 8_000, 16_000] as const;
-const CONNECTION_ESTABLISHMENT_TIMEOUT = "15 seconds";
+const CONNECTION_ESTABLISHMENT_TIMEOUT_MS =
+  ConnectionDriver.CONNECTION_ENDPOINT_TIMEOUT_MS * (MAX_BEARER_CONNECTION_ENDPOINTS + 1);
 const CONNECTION_PROBE_TIMEOUT = "15 seconds";
 const MOBILE_CONNECTION_PROBE_TIMEOUT = "3 seconds";
 const BACKOFF_RESET_AFTER_MS = 30_000;
@@ -506,7 +507,7 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
           }),
         ),
       ),
-      Effect.sleep(CONNECTION_ESTABLISHMENT_TIMEOUT).pipe(
+      Effect.sleep(CONNECTION_ESTABLISHMENT_TIMEOUT_MS).pipe(
         Effect.as<EstablishmentEvent>({ _tag: "TimedOut" }),
       ),
     ]);

@@ -10,6 +10,7 @@ import {
 } from "./model.ts";
 import {
   connectionCatalogDisplayUrl,
+  connectionCatalogDisplayUrls,
   connectionPhaseMessage,
   connectionStatusText,
   connectionStatusTitle,
@@ -32,6 +33,16 @@ const ENTRY: ConnectionCatalogEntry = {
       label: TARGET.label,
       httpBaseUrl: "https://environment.example.test",
       wsBaseUrl: "wss://environment.example.test",
+      endpoints: [
+        {
+          httpBaseUrl: "https://environment.example.test",
+          wsBaseUrl: "wss://environment.example.test",
+        },
+        {
+          httpBaseUrl: "https://public.example.test",
+          wsBaseUrl: "wss://public.example.test",
+        },
+      ],
     }),
   ),
 };
@@ -53,6 +64,31 @@ function supervisorState(overrides: Partial<SupervisorConnectionState>): Supervi
 describe("connection presentation", () => {
   it("preserves profile display information without exposing credentials", () => {
     expect(connectionCatalogDisplayUrl(ENTRY)).toBe("https://environment.example.test");
+    expect(connectionCatalogDisplayUrls(ENTRY)).toEqual([
+      "https://environment.example.test",
+      "https://public.example.test",
+    ]);
+  });
+
+  it("keeps the legacy endpoint first when persisted endpoint fields disagree", () => {
+    const profile = new BearerConnectionProfile({
+      connectionId: TARGET.connectionId,
+      environmentId: TARGET.environmentId,
+      label: TARGET.label,
+      httpBaseUrl: "https://legacy.example.test",
+      wsBaseUrl: "wss://legacy.example.test",
+      endpoints: [
+        {
+          httpBaseUrl: "https://new.example.test",
+          wsBaseUrl: "wss://new.example.test",
+        },
+      ],
+    });
+
+    expect(connectionCatalogDisplayUrls({ ...ENTRY, profile: Option.some(profile) })).toEqual([
+      "https://legacy.example.test",
+      "https://new.example.test",
+    ]);
   });
 
   it("distinguishes initial connection, reconnect, and retry errors", () => {

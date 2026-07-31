@@ -139,13 +139,16 @@ export const make = Effect.gen(function* () {
     });
 
     yield* terminalManager
-      .open({
-        threadId: input.threadId,
-        terminalId,
-        cwd,
-        worktreePath: input.worktreePath,
-        env,
-      })
+      .open(
+        {
+          threadId: input.threadId,
+          terminalId,
+          cwd,
+          worktreePath: input.worktreePath,
+          env,
+        },
+        null,
+      )
       .pipe(
         Effect.mapError(
           (cause) =>
@@ -157,11 +160,14 @@ export const make = Effect.gen(function* () {
         ),
       );
     yield* terminalManager
-      .write({
-        threadId: input.threadId,
-        terminalId,
-        data: `${script.command}\r`,
-      })
+      .write(
+        {
+          threadId: input.threadId,
+          terminalId,
+          data: `${script.command}\r`,
+        },
+        null,
+      )
       .pipe(
         Effect.mapError(
           (cause) =>

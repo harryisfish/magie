@@ -1,6 +1,7 @@
 import type {
   EnvironmentId,
   TerminalAttachStreamEvent,
+  TerminalControlRole,
   TerminalMetadataStreamEvent,
   TerminalSessionSnapshot,
   TerminalSummary,
@@ -12,6 +13,7 @@ export interface TerminalSessionState {
   readonly buffer: string;
   readonly status: TerminalSessionSnapshot["status"] | "closed";
   readonly error: string | null;
+  readonly control: TerminalControlRole;
   readonly hasRunningSubprocess: boolean;
   readonly updatedAt: string | null;
   readonly version: number;
@@ -21,6 +23,7 @@ export interface TerminalBufferState {
   readonly buffer: string;
   readonly status: TerminalSessionSnapshot["status"] | "closed";
   readonly error: string | null;
+  readonly control: TerminalControlRole;
   readonly updatedAt: string | null;
   readonly version: number;
 }
@@ -48,6 +51,7 @@ export const EMPTY_TERMINAL_BUFFER_STATE = Object.freeze<TerminalBufferState>({
   buffer: "",
   status: "closed",
   error: null,
+  control: "available",
   updatedAt: null,
   version: 0,
 });
@@ -57,6 +61,7 @@ export const EMPTY_TERMINAL_SESSION_STATE = Object.freeze<TerminalSessionState>(
   buffer: "",
   status: "closed",
   error: null,
+  control: "available",
   hasRunningSubprocess: false,
   updatedAt: null,
   version: 0,
@@ -91,11 +96,13 @@ function trimBufferToBytes(buffer: string, maxBufferBytes: number): string {
 export function terminalBufferStateFromSnapshot(
   snapshot: TerminalSessionSnapshot,
   maxBufferBytes: number,
+  control: TerminalControlRole = "available",
 ): TerminalBufferState {
   return {
     buffer: trimBufferToBytes(snapshot.history, maxBufferBytes),
     status: snapshot.status,
     error: null,
+    control,
     updatedAt: snapshot.updatedAt,
     version: 1,
   };
@@ -116,6 +123,7 @@ export function combineTerminalSessionState(
     buffer: buffer.buffer,
     status: buffer.version > 0 ? buffer.status : (summary?.status ?? buffer.status),
     error: buffer.error,
+    control: buffer.control,
     hasRunningSubprocess: summary?.hasRunningSubprocess ?? false,
     updatedAt: latestTimestamp(summary?.updatedAt ?? null, buffer.updatedAt),
     version: buffer.version,
@@ -129,8 +137,9 @@ export function applyTerminalAttachStreamEvent(
 ): TerminalBufferState {
   switch (event.type) {
     case "snapshot":
+      return terminalBufferStateFromSnapshot(event.snapshot, maxBufferBytes, event.control);
     case "restarted":
-      return terminalBufferStateFromSnapshot(event.snapshot, maxBufferBytes);
+      return terminalBufferStateFromSnapshot(event.snapshot, maxBufferBytes, current.control);
     case "output":
       return {
         ...current,
@@ -169,6 +178,12 @@ export function applyTerminalAttachStreamEvent(
       };
     case "activity":
       return current;
+    case "control":
+      return {
+        ...current,
+        control: event.control,
+        version: current.version + 1,
+      };
   }
 }
 

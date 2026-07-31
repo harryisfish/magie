@@ -1,8 +1,11 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
+import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
+import * as Ref from "effect/Ref";
 import * as TestClock from "effect/testing/TestClock";
 
 import * as ServerConfig from "../config.ts";
@@ -299,8 +302,8 @@ it.layer(NodeServices.layer)("SessionStore.layer", (it) => {
 
       expect(stillConnected[0]?.lastConnectedAt?.toString()).toBe(firstConnectedAt?.toString());
 
-      yield* sessions.markDisconnected(issued.sessionId);
-      yield* sessions.markDisconnected(issued.sessionId);
+      expect(yield* sessions.markDisconnected(issued.sessionId)).toBe(false);
+      expect(yield* sessions.markDisconnected(issued.sessionId)).toBe(true);
       const afterDisconnect = yield* sessions.listActive();
 
       expect(afterDisconnect[0]?.connected).toBe(false);
@@ -314,5 +317,41 @@ it.layer(NodeServices.layer)("SessionStore.layer", (it) => {
       expect(afterReconnect[0]?.lastConnectedAt).not.toBeNull();
       expect(afterReconnect[0]?.lastConnectedAt?.toString()).not.toBe(firstConnectedAt?.toString());
     }).pipe(Effect.provide(Layer.merge(makeSessionStoreLayer(), TestClock.layer()))),
+  );
+
+  it.effect("finishes last-disconnect cleanup before the same session reconnects", () =>
+    Effect.gen(function* () {
+      const sessions = yield* SessionStore.SessionStore;
+      const issued = yield* sessions.issue({
+        subject: "reconnect-race-test",
+        method: "bearer-access-token",
+      });
+      yield* sessions.markConnected(issued.sessionId);
+      const cleanupStarted = yield* Deferred.make<void>();
+      const allowCleanup = yield* Deferred.make<void>();
+      const reconnected = yield* Ref.make(false);
+
+      const disconnect = yield* sessions
+        .markDisconnected(
+          issued.sessionId,
+          Deferred.succeed(cleanupStarted, undefined).pipe(
+            Effect.andThen(Deferred.await(allowCleanup)),
+          ),
+        )
+        .pipe(Effect.forkChild);
+      yield* Deferred.await(cleanupStarted);
+      const reconnect = yield* sessions.markConnected(issued.sessionId).pipe(
+        Effect.tap(() => Ref.set(reconnected, true)),
+        Effect.forkChild,
+      );
+      yield* Effect.yieldNow;
+
+      expect(yield* Ref.get(reconnected)).toBe(false);
+      yield* Deferred.succeed(allowCleanup, undefined);
+      expect(yield* Fiber.join(disconnect)).toBe(true);
+      yield* Fiber.join(reconnect);
+      expect(yield* Ref.get(reconnected)).toBe(true);
+      expect((yield* sessions.listActive())[0]?.connected).toBe(true);
+    }).pipe(Effect.provide(makeSessionStoreLayer())),
   );
 });

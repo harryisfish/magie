@@ -16,6 +16,7 @@ function environment(
     environmentId: EnvironmentId.make(environmentId),
     environmentLabel,
     displayUrl,
+    displayUrls: [displayUrl],
     isRelayManaged: false,
     connectionState: "connected",
     connectionError: null,
@@ -46,18 +47,22 @@ it("leaves environments outside the showcase fixture unchanged", () => {
     "My Workstation",
     "https://workstation.example.test/",
   );
+  const withFallback = {
+    ...original,
+    displayUrls: [original.displayUrl, "https://fallback.example.test/"],
+  };
 
-  assert.deepStrictEqual(applyShowcaseLocalEnvironmentDisplayUrls([original]), [original]);
+  assert.deepStrictEqual(applyShowcaseLocalEnvironmentDisplayUrls([withFallback]), [withFallback]);
 });
 
 it("does not persist a cosmetic showcase URL when only the label is saved", () => {
   assert.equal(
     resolveShowcaseEnvironmentUpdateDisplayUrl({
-      actualDisplayUrl: "http://127.0.0.1:3773/",
+      actualDisplayUrl: "http://127.0.0.1:3773/\nhttps://fallback.example.test/",
       presentedDisplayUrl: "https://moonbase.tail9f3a.ts.net/",
       submittedDisplayUrl: "https://moonbase.tail9f3a.ts.net/",
     }),
-    "http://127.0.0.1:3773/",
+    "http://127.0.0.1:3773/\nhttps://fallback.example.test/",
   );
   assert.equal(
     resolveShowcaseEnvironmentUpdateDisplayUrl({

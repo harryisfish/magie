@@ -1,5 +1,6 @@
 import { EnvironmentId } from "@t3tools/contracts";
 import { describe, expect, it } from "@effect/vitest";
+import * as Schema from "effect/Schema";
 
 import * as TokenStore from "../authorization/tokenStore.ts";
 import {
@@ -16,6 +17,7 @@ import {
   SshConnectionTarget,
 } from "../connection/model.ts";
 import {
+  ConnectionCatalogDocument,
   EMPTY_CONNECTION_CATALOG_DOCUMENT,
   registerConnectionInCatalog,
   removeConnectionFromCatalog,
@@ -52,6 +54,22 @@ const REMOTE_TOKEN = new TokenStore.RemoteDpopAccessToken({
 });
 
 describe("ConnectionCatalogDocument", () => {
+  it("decodes legacy single-endpoint bearer profiles", () => {
+    const legacyDocument = {
+      schemaVersion: 1,
+      targets: [BEARER_TARGET],
+      profiles: [BEARER_PROFILE],
+      credentials: [],
+      remoteDpopTokens: [],
+    } as const;
+    const encoded = Schema.encodeSync(ConnectionCatalogDocument)(legacyDocument);
+    const decoded = Schema.decodeUnknownSync(ConnectionCatalogDocument)(
+      JSON.parse(JSON.stringify(encoded)),
+    );
+
+    expect(decoded.profiles[0]).toEqual(BEARER_PROFILE);
+  });
+
   it("registers a bearer connection as one catalog mutation", () => {
     const document = registerConnectionInCatalog(
       EMPTY_CONNECTION_CATALOG_DOCUMENT,

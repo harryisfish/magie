@@ -12,12 +12,15 @@ const SHOWCASE_LOCAL_ENVIRONMENT_DISPLAY_URLS: Readonly<Record<string, string>> 
 export function applyShowcaseLocalEnvironmentDisplayUrls(
   environments: ReadonlyArray<ConnectedEnvironmentSummary>,
 ): ReadonlyArray<ConnectedEnvironmentSummary> {
-  return environments.map((environment) => ({
-    ...environment,
-    displayUrl:
-      SHOWCASE_LOCAL_ENVIRONMENT_DISPLAY_URLS[environment.environmentLabel] ??
-      environment.displayUrl,
-  }));
+  return environments.map((environment) => {
+    const displayUrl = SHOWCASE_LOCAL_ENVIRONMENT_DISPLAY_URLS[environment.environmentLabel];
+    if (displayUrl === undefined) return environment;
+    return {
+      ...environment,
+      displayUrl,
+      displayUrls: [displayUrl],
+    };
+  });
 }
 
 export function resolveShowcaseEnvironmentUpdateDisplayUrl(input: {
@@ -42,6 +45,7 @@ export const SHOWCASE_CONNECTED_CLOUD_ENVIRONMENTS: ReadonlyArray<ConnectedEnvir
     environmentId: EnvironmentId.make("showcase-aurora-gpu"),
     environmentLabel: "Aurora GPU Pod",
     displayUrl: "https://aurora-gpu.t3.sh",
+    displayUrls: ["https://aurora-gpu.t3.sh"],
     isRelayManaged: true,
     connectionState: "connected",
     connectionError: null,

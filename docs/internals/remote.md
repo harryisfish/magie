@@ -18,7 +18,7 @@ the connection layer, never by splitting the runtime.
 │ Client (desktop / mobile / web)              │
 │  known environments, connection supervisor   │
 └───────────────┬──────────────────────────────┘
-                │ resolves one access endpoint
+                │ resolves one or more ordered access endpoints
 ┌───────────────▼──────────────────────────────┐
 │ Access method                                │
 │  direct ws/wss, relay tunnel,                │
@@ -53,7 +53,7 @@ control plane or a copy of session state.
 | Target                    | Used for                                                                 |
 | ------------------------- | ------------------------------------------------------------------------ |
 | `PrimaryConnectionTarget` | The platform-managed local server (desktop backend, CLI-served web app). |
-| `BearerConnectionTarget`  | Any manually paired endpoint reached over direct HTTP/WebSocket.         |
+| `BearerConnectionTarget`  | Manually paired endpoint(s) reached over direct HTTP/WebSocket.          |
 | `RelayConnectionTarget`   | Managed T3 Connect relay tunnels.                                        |
 | `SshConnectionTarget`     | Desktop-managed SSH environments.                                        |
 
@@ -62,6 +62,15 @@ separate target kind. A Tailscale URL is paired through the ordinary bearer path
 [`onboarding.ts`][onboarding] (`preparePairingRegistration`), which accepts either a pairing URL or a
 host plus pairing code. Tailscale is an endpoint provider and transport, not a distinct runtime
 concept.
+
+A persisted bearer profile may contain up to eight ordered HTTP/WebSocket endpoint pairs. The
+legacy `httpBaseUrl` and `wsBaseUrl` fields remain the first endpoint so older single-endpoint
+documents and clients agree on the same primary route. Endpoint changes do not create another
+Environment: `environmentId` and `connectionId` stay stable, and the connection driver rotates only
+within the current Environment attempt.
+
+These saved bearer fallbacks are client-authored connection profile data. They are separate from the
+server- or desktop-authored `AdvertisedEndpoint` hints described below.
 
 ### AdvertisedEndpoint
 
@@ -192,6 +201,25 @@ it separate from access.
 
 The same `ExecutionEnvironment` can be reached several of these ways. Only the launch and access
 paths differ.
+
+## Multi-client Terminal control
+
+`TerminalManager` keeps one terminal session and fans its snapshot and live events out to every
+`terminal.attach` subscriber. Attach is observation-only: its snapshot includes a role relative to
+the authenticated client (`available`, `controller`, or `observer`) but does not mutate ownership.
+
+`terminal.claimControl` uses the authenticated `AuthSessionId`. A non-force claim can take only an
+unowned Terminal; `force: true` performs an explicit takeover. `terminal.write`, `terminal.resize`,
+and size-changing `terminal.open` paths verify that session before touching a running PTY. Trusted
+server-side setup scripts pass an explicit internal caller instead of creating a synthetic owner.
+
+Control changes are streamed to every viewer relative to its own Auth Session. `SessionStore`
+counts concurrent WebSockets for that session, so closing one tab or reconnecting one socket does
+not release control. The last WebSocket disconnect releases every Terminal owned by that Auth
+Session under the existing per-thread lock, then publishes `available` to remaining viewers.
+
+Ownership is process-local, matching the current PTY lifetime. This does not add a detached terminal
+daemon or preserve a live PTY across a server restart.
 
 ## Security model
 

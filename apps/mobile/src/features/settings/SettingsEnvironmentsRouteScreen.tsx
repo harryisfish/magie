@@ -75,8 +75,8 @@ export function SettingsEnvironmentsRouteScreen() {
         displayUrl:
           actualEnvironment && presentedEnvironment
             ? resolveShowcaseEnvironmentUpdateDisplayUrl({
-                actualDisplayUrl: actualEnvironment.displayUrl,
-                presentedDisplayUrl: presentedEnvironment.displayUrl,
+                actualDisplayUrl: actualEnvironment.displayUrls.join("\n"),
+                presentedDisplayUrl: presentedEnvironment.displayUrls.join("\n"),
                 submittedDisplayUrl: updates.displayUrl,
               })
             : updates.displayUrl,
@@ -136,6 +136,7 @@ export function SettingsEnvironmentsRouteScreen() {
                 <ConnectionEnvironmentRow
                   environment={environment}
                   expanded={expandedId === environment.environmentId}
+                  hideActiveEndpoint={SHOWCASE_ENABLED}
                   onToggle={() => handleToggle(environment.environmentId)}
                   onReconnect={onReconnectEnvironment}
                   onRemove={onRemoveEnvironmentPress}

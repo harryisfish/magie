@@ -321,6 +321,35 @@ describe("RpcSessionFactory", () => {
     }),
   );
 
+  it.effect("blocks readiness when websocket sync resolves a different environment", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { factory, sockets } = yield* makeFactory();
+        const session = yield* factory.connect(PREPARED);
+        const readyFiber = yield* Effect.forkChild(Effect.flip(session.ready));
+        const socket = yield* awaitSocket(sockets);
+        socket.open();
+        const actualEnvironmentId = EnvironmentId.make("environment-2");
+        yield* completeInitialConfig(
+          socket,
+          encodeServerConfig({
+            ...SERVER_CONFIG,
+            environment: {
+              ...SERVER_CONFIG.environment,
+              environmentId: actualEnvironmentId,
+            },
+          }),
+        );
+
+        expect(yield* Fiber.join(readyFiber)).toMatchObject({
+          _tag: "ConnectionBlockedError",
+          reason: "configuration",
+          message: `Connected environment ${actualEnvironmentId} does not match ${TARGET.environmentId}.`,
+        });
+      }),
+    ),
+  );
+
   it.effect("uses the legacy config RPC for probes when the server lacks the capability", () =>
     Effect.scoped(
       Effect.gen(function* () {

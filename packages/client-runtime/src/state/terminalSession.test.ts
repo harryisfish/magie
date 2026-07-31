@@ -113,6 +113,7 @@ describe("terminal session reducers", () => {
     const snapshot = applyTerminalAttachStreamEvent(EMPTY_TERMINAL_BUFFER_STATE, {
       type: "snapshot",
       snapshot: BASE_SNAPSHOT,
+      control: "controller",
     });
     const output = applyTerminalAttachStreamEvent(
       snapshot,
@@ -130,7 +131,19 @@ describe("terminal session reducers", () => {
       status: "running",
       error: null,
       version: 2,
+      control: "controller",
     });
+  });
+
+  it("projects terminal control changes", () => {
+    const controlled = applyTerminalAttachStreamEvent(EMPTY_TERMINAL_BUFFER_STATE, {
+      type: "control",
+      threadId: TARGET.threadId,
+      terminalId: TARGET.terminalId,
+      control: "observer",
+    });
+
+    expect(controlled).toMatchObject({ control: "observer", version: 1 });
   });
 
   it("reduces terminal metadata snapshots, upserts, and removals", () => {

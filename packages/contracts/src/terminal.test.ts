@@ -4,6 +4,8 @@ import { describe, expect, it } from "vite-plus/test";
 import {
   DEFAULT_TERMINAL_ID,
   TerminalAttachInput,
+  TerminalAttachStreamEvent,
+  TerminalClaimControlInput,
   TerminalClearInput,
   TerminalCloseInput,
   TerminalEvent,
@@ -120,6 +122,40 @@ describe("TerminalAttachInput", () => {
     });
 
     expect(parsed.restartIfNotRunning).toBe(true);
+  });
+});
+
+describe("Terminal control", () => {
+  it("accepts explicit takeover requests", () => {
+    expect(
+      decodeSync(TerminalClaimControlInput, {
+        threadId: "thread-1",
+        terminalId: DEFAULT_TERMINAL_ID,
+        force: true,
+      }),
+    ).toMatchObject({ force: true });
+  });
+
+  it("requires the viewer-relative control role on attach snapshots", () => {
+    expect(
+      decodes(TerminalAttachStreamEvent, {
+        type: "snapshot",
+        snapshot: {
+          threadId: "thread-1",
+          terminalId: DEFAULT_TERMINAL_ID,
+          cwd: "/tmp/project",
+          worktreePath: null,
+          status: "running",
+          pid: 1234,
+          history: "",
+          exitCode: null,
+          exitSignal: null,
+          label: "Terminal 1",
+          updatedAt: "2026-01-01T00:00:00.000Z",
+        },
+        control: "observer",
+      }),
+    ).toBe(true);
   });
 });
 

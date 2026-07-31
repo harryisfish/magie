@@ -1165,6 +1165,10 @@ function ChatViewContent(props: ChatViewProps) {
   });
   const openTerminal = useAtomCommand(terminalEnvironment.open, "terminal open");
   const writeTerminal = useAtomCommand(terminalEnvironment.write, "terminal write");
+  const claimTerminalControl = useAtomCommand(
+    terminalEnvironment.claimControl,
+    "terminal claim control",
+  );
   const closeTerminalMutation = useAtomCommand(terminalEnvironment.close, "terminal close");
   const createThread = useAtomCommand(threadEnvironment.create, { reportFailure: false });
   const deleteThread = useAtomCommand(threadEnvironment.delete, { reportFailure: false });
@@ -2872,6 +2876,25 @@ function ChatViewContent(props: ChatViewProps) {
         return;
       }
 
+      const claimResult = await claimTerminalControl({
+        environmentId,
+        input: {
+          threadId: activeThreadId,
+          terminalId: targetTerminalId,
+          force: false,
+        },
+      });
+      if (claimResult._tag === "Failure") {
+        if (!isAtomCommandInterrupted(claimResult)) {
+          const error = squashAtomCommandFailure(claimResult);
+          setThreadError(
+            activeThreadId,
+            error instanceof Error ? error.message : `Failed to run script "${script.name}".`,
+          );
+        }
+        return;
+      }
+
       const writeResult = await writeTerminal({
         environmentId,
         input: {
@@ -2893,6 +2916,7 @@ function ChatViewContent(props: ChatViewProps) {
       activeThread,
       activeThreadId,
       activeThreadRef,
+      claimTerminalControl,
       gitCwd,
       setTerminalOpen,
       setThreadError,

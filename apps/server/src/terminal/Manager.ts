@@ -7,11 +7,13 @@
  * @module TerminalManager
  */
 import {
+  AuthSessionId,
   DEFAULT_TERMINAL_ID,
   TerminalCwdError,
   TerminalCwdNotDirectoryError,
   TerminalCwdNotFoundError,
   TerminalCwdStatError,
+  TerminalControlError,
   TerminalError,
   TerminalHistoryError,
   TerminalNotRunningError,
@@ -20,8 +22,11 @@ import {
   TerminalWriteError,
   type TerminalAttachInput,
   type TerminalAttachStreamEvent,
+  type TerminalClaimControlInput,
   type TerminalClearInput,
   type TerminalCloseInput,
+  type TerminalControlRole,
+  type TerminalControlState,
   type TerminalEvent,
   type TerminalMetadataStreamEvent,
   type TerminalOpenInput,
@@ -125,6 +130,7 @@ export class TerminalManager extends Context.Service<
      */
     readonly open: (
       input: TerminalOpenInput,
+      controllerSessionId: AuthSessionId | null,
     ) => Effect.Effect<TerminalSessionSnapshot, TerminalError>;
 
     /**
@@ -135,17 +141,31 @@ export class TerminalManager extends Context.Service<
     readonly attachStream: (
       input: TerminalAttachInput,
       listener: (event: TerminalAttachStreamEvent) => Effect.Effect<void>,
+      viewerSessionId: AuthSessionId,
     ) => Effect.Effect<() => void, TerminalError>;
+
+    readonly claimControl: (
+      input: TerminalClaimControlInput,
+      controllerSessionId: AuthSessionId,
+    ) => Effect.Effect<TerminalControlState, TerminalError>;
 
     /**
      * Write input bytes to a terminal session.
      */
-    readonly write: (input: TerminalWriteInput) => Effect.Effect<void, TerminalError>;
+    readonly write: (
+      input: TerminalWriteInput,
+      controllerSessionId: AuthSessionId | null,
+    ) => Effect.Effect<void, TerminalError>;
 
     /**
      * Resize the PTY backing a terminal session.
      */
-    readonly resize: (input: TerminalResizeInput) => Effect.Effect<void, TerminalError>;
+    readonly resize: (
+      input: TerminalResizeInput,
+      controllerSessionId: AuthSessionId | null,
+    ) => Effect.Effect<void, TerminalError>;
+
+    readonly releaseSessionControls: (controllerSessionId: AuthSessionId) => Effect.Effect<void>;
 
     /**
      * Clear terminal output history.
@@ -288,6 +308,13 @@ type DrainProcessEventAction =
 interface TerminalManagerState {
   sessions: Map<string, TerminalSessionState>;
   killFibers: Map<PtyAdapter.PtyProcess, Fiber.Fiber<void, never>>;
+  controllers: Map<string, AuthSessionId>;
+}
+
+interface TerminalControlChange {
+  readonly threadId: string;
+  readonly terminalId: string;
+  readonly controllerSessionId: AuthSessionId | null;
 }
 
 function truncateTerminalWireLabel(value: string): string {
@@ -374,10 +401,7 @@ function shouldPublishTerminalMetadataEvent(event: TerminalEvent): boolean {
 function terminalEventToAttachEvent(event: TerminalEvent): TerminalAttachStreamEvent | null {
   switch (event.type) {
     case "started":
-      return {
-        type: "snapshot",
-        snapshot: event.snapshot,
-      };
+      return null;
     case "output":
     case "exited":
     case "closed":
@@ -1054,6 +1078,26 @@ function toSessionKey(threadId: string, terminalId: string): string {
   return `${threadId}\u0000${terminalId}`;
 }
 
+function terminalControlRole(
+  controllerSessionId: AuthSessionId | undefined,
+  viewerSessionId: AuthSessionId,
+): TerminalControlRole {
+  if (controllerSessionId === undefined) return "available";
+  return controllerSessionId === viewerSessionId ? "controller" : "observer";
+}
+
+function terminalControlAttachEvent(
+  change: TerminalControlChange,
+  viewerSessionId: AuthSessionId,
+): TerminalAttachStreamEvent {
+  return {
+    type: "control",
+    threadId: change.threadId,
+    terminalId: change.terminalId,
+    control: terminalControlRole(change.controllerSessionId ?? undefined, viewerSessionId),
+  };
+}
+
 function shouldExcludeTerminalEnvKey(key: string): boolean {
   const normalizedKey = key.toUpperCase();
   if (normalizedKey.startsWith("T3CODE_")) {
@@ -1209,9 +1253,13 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
   const managerStateRef = yield* SynchronizedRef.make<TerminalManagerState>({
     sessions: new Map(),
     killFibers: new Map(),
+    controllers: new Map(),
   });
   const threadLocksRef = yield* SynchronizedRef.make(new Map<string, Semaphore.Semaphore>());
   const terminalEventListeners = new Set<(event: TerminalEvent) => Effect.Effect<void>>();
+  const terminalControlListeners = new Set<
+    (change: TerminalControlChange) => Effect.Effect<void>
+  >();
   const workerScope = yield* Scope.make("sequential");
   yield* Effect.addFinalizer(() => Scope.close(workerScope, Exit.void));
 
@@ -1219,6 +1267,13 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     Effect.gen(function* () {
       for (const listener of terminalEventListeners) {
         yield* listener(event).pipe(Effect.ignoreCause({ log: true }));
+      }
+    });
+
+  const publishControlChange = (change: TerminalControlChange) =>
+    Effect.gen(function* () {
+      for (const listener of terminalControlListeners) {
+        yield* listener(change).pipe(Effect.ignoreCause({ log: true }));
       }
     });
 
@@ -1605,6 +1660,96 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     );
   });
 
+  const readControlState = Effect.fn("terminal.readControlState")(function* (
+    input: { readonly threadId: string; readonly terminalId: string },
+    viewerSessionId: AuthSessionId,
+  ): Effect.fn.Return<TerminalControlState> {
+    const state = yield* readManagerState;
+    return {
+      threadId: input.threadId,
+      terminalId: input.terminalId,
+      control: terminalControlRole(
+        state.controllers.get(toSessionKey(input.threadId, input.terminalId)),
+        viewerSessionId,
+      ),
+    };
+  });
+
+  const claimControlLocked = Effect.fn("terminal.claimControlLocked")(function* (
+    input: TerminalClaimControlInput,
+    controllerSessionId: AuthSessionId,
+  ) {
+    yield* requireSession(input.threadId, input.terminalId);
+    const key = toSessionKey(input.threadId, input.terminalId);
+    const result = yield* modifyManagerState<{
+      readonly acquired: boolean;
+      readonly changed: boolean;
+    }>((state) => {
+      const current = state.controllers.get(key);
+      if (current !== undefined && current !== controllerSessionId && input.force !== true) {
+        return [{ acquired: false, changed: false } as const, state] as const;
+      }
+      if (current === controllerSessionId) {
+        return [{ acquired: true, changed: false } as const, state] as const;
+      }
+      const controllers = new Map(state.controllers);
+      controllers.set(key, controllerSessionId);
+      return [{ acquired: true, changed: true } as const, { ...state, controllers }] as const;
+    });
+    if (!result.acquired) {
+      return yield* new TerminalControlError({
+        threadId: input.threadId,
+        terminalId: input.terminalId,
+      });
+    }
+    if (result.changed) {
+      yield* publishControlChange({
+        threadId: input.threadId,
+        terminalId: input.terminalId,
+        controllerSessionId,
+      });
+    }
+    return yield* readControlState(input, controllerSessionId);
+  });
+
+  const requireControlLocked = Effect.fn("terminal.requireControlLocked")(function* (
+    input: { readonly threadId: string; readonly terminalId: string },
+    controllerSessionId: AuthSessionId | null,
+  ) {
+    if (controllerSessionId === null) return;
+    const controller = (yield* readManagerState).controllers.get(
+      toSessionKey(input.threadId, input.terminalId),
+    );
+    if (controller !== controllerSessionId) {
+      return yield* new TerminalControlError({
+        threadId: input.threadId,
+        terminalId: input.terminalId,
+      });
+    }
+  });
+
+  const releaseControlLocked = Effect.fn("terminal.releaseControlLocked")(function* (
+    input: { readonly threadId: string; readonly terminalId: string },
+    controllerSessionId: AuthSessionId,
+  ) {
+    const key = toSessionKey(input.threadId, input.terminalId);
+    const changed = yield* modifyManagerState((state) => {
+      if (state.controllers.get(key) !== controllerSessionId) {
+        return [false, state] as const;
+      }
+      const controllers = new Map(state.controllers);
+      controllers.delete(key);
+      return [true, { ...state, controllers }] as const;
+    });
+    if (changed) {
+      yield* publishControlChange({
+        threadId: input.threadId,
+        terminalId: input.terminalId,
+        controllerSessionId: null,
+      });
+    }
+  });
+
   const sessionsForThread = Effect.fn("terminal.sessionsForThread")(function* (threadId: string) {
     return yield* readManagerState.pipe(
       Effect.map((state) =>
@@ -1631,14 +1776,16 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
         );
 
         const sessions = new Map(state.sessions);
+        const controllers = new Map(state.controllers);
 
         const toEvict = inactiveSessions.length - maxRetainedInactiveSessions;
         for (const session of inactiveSessions.slice(0, toEvict)) {
           const key = toSessionKey(session.threadId, session.terminalId);
           sessions.delete(key);
+          controllers.delete(key);
         }
 
-        return [undefined, { ...state, sessions }] as const;
+        return [undefined, { ...state, sessions, controllers }] as const;
       });
     },
   );
@@ -1993,16 +2140,29 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
 
     yield* flushPersist(threadId, terminalId);
 
-    const removed = yield* modifyManagerState((state) => {
+    const removed = yield* modifyManagerState<{
+      readonly session: boolean;
+      readonly control: boolean;
+    }>((state) => {
       if (!state.sessions.has(key)) {
-        return [false, state] as const;
+        return [{ session: false, control: false } as const, state] as const;
       }
       const sessions = new Map(state.sessions);
+      const controllers = new Map(state.controllers);
       sessions.delete(key);
-      return [true, { ...state, sessions }] as const;
+      const control = controllers.delete(key);
+      return [{ session: true, control } as const, { ...state, sessions, controllers }] as const;
     });
 
-    if (removed) {
+    if (removed.control) {
+      yield* publishControlChange({
+        threadId,
+        terminalId,
+        controllerSessionId: null,
+      });
+    }
+
+    if (removed.session) {
       yield* publishEvent({
         type: "closed",
         threadId,
@@ -2123,6 +2283,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
             {
               ...state,
               sessions: new Map(),
+              controllers: new Map(),
             },
           ] as const,
       );
@@ -2143,7 +2304,10 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     }).pipe(Effect.ignoreCause({ log: true })),
   );
 
-  const openLocked = Effect.fn("terminal.openLocked")(function* (input: TerminalOpenInput) {
+  const openLocked = Effect.fn("terminal.openLocked")(function* (
+    input: TerminalOpenInput,
+    controllerSessionId: AuthSessionId | null,
+  ) {
     const terminalId = input.terminalId;
     yield* assertValidCwd(input.cwd);
 
@@ -2216,8 +2380,17 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
       liveSession.cwd !== input.cwd ||
       runtimeEnvChanged ||
       liveSession.worktreePath !== nextWorktreePath;
+    const currentController = (yield* readManagerState).controllers.get(sessionKey);
+    const canAdjustRunningTerminal =
+      controllerSessionId === null || currentController === controllerSessionId;
 
     if (launchContextChanged) {
+      if (liveSession.process && !canAdjustRunningTerminal) {
+        return yield* new TerminalControlError({
+          threadId: input.threadId,
+          terminalId,
+        });
+      }
       yield* stopProcess(liveSession);
       liveSession.cwd = input.cwd;
       liveSession.worktreePath = nextWorktreePath;
@@ -2256,7 +2429,10 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
       return snapshot(liveSession);
     }
 
-    if (liveSession.cols !== targetCols || liveSession.rows !== targetRows) {
+    if (
+      canAdjustRunningTerminal &&
+      (liveSession.cols !== targetCols || liveSession.rows !== targetRows)
+    ) {
       yield* resizePtyProcess(liveSession, liveSession.process, targetCols, targetRows);
       liveSession.cols = targetCols;
       liveSession.rows = targetRows;
@@ -2266,10 +2442,10 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     return snapshot(liveSession);
   });
 
-  const open: TerminalManager["Service"]["open"] = (input) =>
-    withThreadLock(input.threadId, openLocked(input));
+  const open: TerminalManager["Service"]["open"] = (input, controllerSessionId) =>
+    withThreadLock(input.threadId, openLocked(input, controllerSessionId));
 
-  const openOrAttachForStream = (input: TerminalAttachInput) =>
+  const openOrAttachForStream = (input: TerminalAttachInput, viewerSessionId: AuthSessionId) =>
     withThreadLock(
       input.threadId,
       Effect.gen(function* () {
@@ -2284,11 +2460,14 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
             });
           }
 
-          return yield* openLocked({
-            ...input,
-            terminalId,
-            cwd: input.cwd,
-          });
+          return yield* openLocked(
+            {
+              ...input,
+              terminalId,
+              cwd: input.cwd,
+            },
+            viewerSessionId,
+          );
         }
 
         const session = existing.value;
@@ -2296,16 +2475,23 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
         const targetRows = input.rows ?? session.rows;
 
         if (!session.process && input.cwd && input.restartIfNotRunning === true) {
-          return yield* openLocked({
-            ...input,
-            terminalId,
-            cwd: input.cwd,
-          });
+          return yield* openLocked(
+            {
+              ...input,
+              terminalId,
+              cwd: input.cwd,
+            },
+            viewerSessionId,
+          );
         }
 
+        const controllerSessionId = (yield* readManagerState).controllers.get(
+          toSessionKey(input.threadId, terminalId),
+        );
         if (
           session.process &&
           session.status === "running" &&
+          controllerSessionId === viewerSessionId &&
           (session.cols !== targetCols || session.rows !== targetRows)
         ) {
           const process = session.process;
@@ -2349,12 +2535,40 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
       };
     });
 
-  const attachStream: TerminalManager["Service"]["attachStream"] = (input, listener) => {
+  const subscribeControl = (listener: (change: TerminalControlChange) => Effect.Effect<void>) =>
+    Effect.sync(() => {
+      terminalControlListeners.add(listener);
+      return () => {
+        terminalControlListeners.delete(listener);
+      };
+    });
+
+  const attachStream: TerminalManager["Service"]["attachStream"] = (
+    input,
+    listener,
+    viewerSessionId,
+  ) => {
     let unsubscribe: (() => void) | null = null;
+    let unsubscribeControl: (() => void) | null = null;
 
     return Effect.gen(function* () {
-      const bufferedEvents: TerminalEvent[] = [];
+      const bufferedEvents: Array<
+        | { readonly type: "terminal"; readonly event: TerminalEvent }
+        | { readonly type: "control"; readonly change: TerminalControlChange }
+      > = [];
       let deliverLive = false;
+
+      const offerTerminalEvent = (event: TerminalEvent) => {
+        if (event.type === "started") {
+          return readControlState(event.snapshot, viewerSessionId).pipe(
+            Effect.flatMap(({ control }) =>
+              listener({ type: "snapshot", snapshot: event.snapshot, control }),
+            ),
+          );
+        }
+        const attachEvent = terminalEventToAttachEvent(event);
+        return attachEvent ? listener(attachEvent) : Effect.void;
+      };
 
       unsubscribe = yield* subscribe((event) => {
         if (event.threadId !== input.threadId || event.terminalId !== input.terminalId) {
@@ -2362,43 +2576,58 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
         }
 
         if (!deliverLive) {
-          bufferedEvents.push(event);
+          bufferedEvents.push({ type: "terminal", event });
           return Effect.void;
         }
 
-        const attachEvent = terminalEventToAttachEvent(event);
-        return attachEvent ? listener(attachEvent) : Effect.void;
+        return offerTerminalEvent(event);
+      });
+      unsubscribeControl = yield* subscribeControl((change) => {
+        if (change.threadId !== input.threadId || change.terminalId !== input.terminalId) {
+          return Effect.void;
+        }
+        if (!deliverLive) {
+          bufferedEvents.push({ type: "control", change });
+          return Effect.void;
+        }
+        return listener(terminalControlAttachEvent(change, viewerSessionId));
       });
 
-      const initialSnapshot = yield* openOrAttachForStream(input);
+      const initialSnapshot = yield* openOrAttachForStream(input, viewerSessionId);
+      const initialControl = yield* readControlState(input, viewerSessionId);
 
       yield* listener({
         type: "snapshot",
         snapshot: initialSnapshot,
+        control: initialControl.control,
       });
 
-      for (const event of bufferedEvents) {
-        if (isDuplicateAttachSnapshotEvent(event, initialSnapshot)) {
+      for (const buffered of bufferedEvents) {
+        if (buffered.type === "control") {
+          yield* listener(terminalControlAttachEvent(buffered.change, viewerSessionId));
           continue;
         }
 
-        const attachEvent = terminalEventToAttachEvent(event);
-        if (attachEvent) {
-          yield* listener(attachEvent);
-        }
+        if (isDuplicateAttachSnapshotEvent(buffered.event, initialSnapshot)) continue;
+
+        yield* offerTerminalEvent(buffered.event);
       }
 
       deliverLive = true;
       return () => {
         unsubscribe?.();
+        unsubscribeControl?.();
         unsubscribe = null;
+        unsubscribeControl = null;
       };
     }).pipe(
       Effect.catchCause((cause) =>
         Effect.flatMap(
           Effect.sync(() => {
             unsubscribe?.();
+            unsubscribeControl?.();
             unsubscribe = null;
+            unsubscribeControl = null;
           }),
           () => Effect.failCause(cause),
         ),
@@ -2488,7 +2717,37 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     );
   };
 
-  const write: TerminalManager["Service"]["write"] = Effect.fn("terminal.write")(function* (input) {
+  const claimControl: TerminalManager["Service"]["claimControl"] = (input, controllerSessionId) =>
+    withThreadLock(input.threadId, claimControlLocked(input, controllerSessionId));
+
+  const releaseSessionControls: TerminalManager["Service"]["releaseSessionControls"] = Effect.fn(
+    "terminal.releaseSessionControls",
+  )(function* (controllerSessionId) {
+    const controlledSessions = yield* Effect.map(readManagerState, (state) => {
+      const controlled: Array<{ readonly threadId: string; readonly terminalId: string }> = [];
+      for (const [key, owner] of state.controllers) {
+        if (owner !== controllerSessionId) continue;
+        const session = state.sessions.get(key);
+        if (session) {
+          controlled.push({
+            threadId: session.threadId,
+            terminalId: session.terminalId,
+          });
+        }
+      }
+      return controlled;
+    });
+    yield* Effect.forEach(
+      controlledSessions,
+      (input) => withThreadLock(input.threadId, releaseControlLocked(input, controllerSessionId)),
+      { discard: true },
+    );
+  });
+
+  const writeLocked = Effect.fn("terminal.write")(function* (
+    input: TerminalWriteInput,
+    controllerSessionId: AuthSessionId | null,
+  ) {
     const terminalId = input.terminalId;
     const session = yield* requireSession(input.threadId, terminalId);
     const process = session.process;
@@ -2499,6 +2758,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
         terminalId,
       });
     }
+    yield* requireControlLocked(input, controllerSessionId);
     yield* Effect.try({
       try: () => process.write(input.data),
       catch: (cause) =>
@@ -2511,7 +2771,13 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     });
   });
 
-  const resizeLocked = Effect.fn("terminal.resize")(function* (input: TerminalResizeInput) {
+  const write: TerminalManager["Service"]["write"] = (input, controllerSessionId) =>
+    withThreadLock(input.threadId, writeLocked(input, controllerSessionId));
+
+  const resizeLocked = Effect.fn("terminal.resize")(function* (
+    input: TerminalResizeInput,
+    controllerSessionId: AuthSessionId | null,
+  ) {
     const session = yield* getSession(input.threadId, input.terminalId);
     // ResizeObserver traffic can already be in flight when the UI closes the session.
     if (Option.isNone(session)) {
@@ -2521,14 +2787,15 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     if (!process || session.value.status !== "running") {
       return;
     }
+    yield* requireControlLocked(input, controllerSessionId);
     yield* resizePtyProcess(session.value, process, input.cols, input.rows);
     session.value.cols = input.cols;
     session.value.rows = input.rows;
     session.value.updatedAt = yield* nowIso;
   });
 
-  const resize: TerminalManager["Service"]["resize"] = (input) =>
-    withThreadLock(input.threadId, resizeLocked(input));
+  const resize: TerminalManager["Service"]["resize"] = (input, controllerSessionId) =>
+    withThreadLock(input.threadId, resizeLocked(input, controllerSessionId));
 
   const clear: TerminalManager["Service"]["clear"] = (input) =>
     withThreadLock(
@@ -2657,8 +2924,10 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
   return TerminalManager.of({
     open,
     attachStream,
+    claimControl,
     write,
     resize,
+    releaseSessionControls,
     clear,
     restart,
     close,

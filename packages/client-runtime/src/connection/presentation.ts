@@ -1,7 +1,7 @@
 import type { ServerConfig } from "@t3tools/contracts";
 import * as Option from "effect/Option";
 
-import type { ConnectionCatalogEntry } from "./catalog.ts";
+import { bearerConnectionProfileEndpoints, type ConnectionCatalogEntry } from "./catalog.ts";
 import type { NetworkStatus, SupervisorConnectionState } from "./model.ts";
 
 export type EnvironmentConnectionPhase =
@@ -90,19 +90,25 @@ export function presentEnvironmentConnection(
 }
 
 export function connectionCatalogDisplayUrl(entry: ConnectionCatalogEntry): string | null {
+  return connectionCatalogDisplayUrls(entry)[0] ?? null;
+}
+
+export function connectionCatalogDisplayUrls(entry: ConnectionCatalogEntry): ReadonlyArray<string> {
   switch (entry.target._tag) {
     case "PrimaryConnectionTarget":
-      return entry.target.httpBaseUrl;
+      return [entry.target.httpBaseUrl];
     case "RelayConnectionTarget":
-      return null;
+      return [];
     case "BearerConnectionTarget":
       return Option.isSome(entry.profile) && entry.profile.value._tag === "BearerConnectionProfile"
-        ? entry.profile.value.httpBaseUrl
-        : null;
+        ? bearerConnectionProfileEndpoints(entry.profile.value).map(
+            (endpoint) => endpoint.httpBaseUrl,
+          )
+        : [];
     case "SshConnectionTarget":
       return Option.isSome(entry.profile) && entry.profile.value._tag === "SshConnectionProfile"
-        ? `${entry.profile.value.target.username}@${entry.profile.value.target.hostname}`
-        : null;
+        ? [`${entry.profile.value.target.username}@${entry.profile.value.target.hostname}`]
+        : [];
   }
 }
 

@@ -61,6 +61,10 @@ export function createTerminalEnvironmentAtoms<R, E>(
       scheduler: lifecycleScheduler,
       concurrency: lifecycleConcurrency,
     }),
+    claimControl: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:terminal:claim-control",
+      tag: WS_METHODS.terminalClaimControl,
+    }),
     write: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:terminal:write",
       tag: WS_METHODS.terminalWrite,

@@ -16,6 +16,7 @@ import * as Layer from "effect/Layer";
 import * as PubSub from "effect/PubSub";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
+import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 import * as Option from "effect/Option";
 
@@ -395,7 +396,10 @@ export class SessionStore extends Context.Service<
       sessionId: AuthSessionId,
     ) => Effect.Effect<number, SessionCredentialInternalError>;
     readonly markConnected: (sessionId: AuthSessionId) => Effect.Effect<void, never>;
-    readonly markDisconnected: (sessionId: AuthSessionId) => Effect.Effect<void, never>;
+    readonly markDisconnected: (
+      sessionId: AuthSessionId,
+      onLastDisconnect?: Effect.Effect<void, never>,
+    ) => Effect.Effect<boolean, never>;
   }
 >()("t3/auth/SessionStore") {}
 
@@ -466,6 +470,8 @@ export const make = Effect.gen(function* () {
   const authSessions = yield* AuthSessions.AuthSessionRepository;
   const signingSecret = yield* secretStore.getOrCreateRandom(SIGNING_SECRET_NAME, 32);
   const connectedSessionsRef = yield* Ref.make(new Map<string, number>());
+  // ponytail: one lifecycle lock is enough for low-volume websocket connects; split per session if contention is measured.
+  const connectionLifecycleLock = yield* Semaphore.make(1);
   const changesPubSub = yield* PubSub.unbounded<SessionCredentialChange>();
   const cookieName = resolveSessionCookieName({
     mode: serverConfig.mode,
@@ -511,64 +517,82 @@ export const make = Effect.gen(function* () {
     });
 
   const markConnected: SessionStore["Service"]["markConnected"] = (sessionId) =>
-    Ref.modify(connectedSessionsRef, (current) => {
-      const next = new Map(current);
-      const wasDisconnected = !next.has(sessionId);
-      next.set(sessionId, (next.get(sessionId) ?? 0) + 1);
-      return [wasDisconnected, next] as const;
-    }).pipe(
-      Effect.flatMap((wasDisconnected) =>
-        wasDisconnected
-          ? DateTime.now.pipe(
-              Effect.flatMap((lastConnectedAt) =>
-                authSessions.setLastConnectedAt({
+    connectionLifecycleLock
+      .withPermits(1)(
+        Ref.modify(connectedSessionsRef, (current) => {
+          const next = new Map(current);
+          const wasDisconnected = !next.has(sessionId);
+          next.set(sessionId, (next.get(sessionId) ?? 0) + 1);
+          return [wasDisconnected, next] as const;
+        }),
+      )
+      .pipe(
+        Effect.flatMap((wasDisconnected) =>
+          wasDisconnected
+            ? DateTime.now.pipe(
+                Effect.flatMap((lastConnectedAt) =>
+                  authSessions.setLastConnectedAt({
+                    sessionId,
+                    lastConnectedAt,
+                  }),
+                ),
+              )
+            : Effect.void,
+        ),
+        Effect.flatMap(() => loadActiveSession(sessionId)),
+        Effect.flatMap((session) =>
+          Option.isSome(session) ? emitUpsert(session.value) : Effect.void,
+        ),
+        Effect.catchCause((cause) =>
+          Effect.logError("Failed to publish connected-session auth update.").pipe(
+            Effect.annotateLogs({
+              sessionId,
+              cause,
+            }),
+          ),
+        ),
+        Effect.withSpan("SessionStore.markConnected"),
+      );
+
+  const markDisconnected: SessionStore["Service"]["markDisconnected"] = (
+    sessionId,
+    onLastDisconnect,
+  ) =>
+    connectionLifecycleLock
+      .withPermits(1)(
+        Ref.modify(connectedSessionsRef, (current) => {
+          const next = new Map(current);
+          const remaining = (next.get(sessionId) ?? 0) - 1;
+          if (remaining > 0) {
+            next.set(sessionId, remaining);
+          } else {
+            next.delete(sessionId);
+          }
+          return [remaining <= 0, next] as const;
+        }).pipe(
+          Effect.tap((lastConnection) =>
+            lastConnection && onLastDisconnect !== undefined ? onLastDisconnect : Effect.void,
+          ),
+        ),
+      )
+      .pipe(
+        Effect.tap(() =>
+          loadActiveSession(sessionId).pipe(
+            Effect.flatMap((session) =>
+              Option.isSome(session) ? emitUpsert(session.value) : Effect.void,
+            ),
+            Effect.catchCause((cause) =>
+              Effect.logError("Failed to publish disconnected-session auth update.").pipe(
+                Effect.annotateLogs({
                   sessionId,
-                  lastConnectedAt,
+                  cause,
                 }),
               ),
-            )
-          : Effect.void,
-      ),
-      Effect.flatMap(() => loadActiveSession(sessionId)),
-      Effect.flatMap((session) =>
-        Option.isSome(session) ? emitUpsert(session.value) : Effect.void,
-      ),
-      Effect.catchCause((cause) =>
-        Effect.logError("Failed to publish connected-session auth update.").pipe(
-          Effect.annotateLogs({
-            sessionId,
-            cause,
-          }),
+            ),
+          ),
         ),
-      ),
-      Effect.withSpan("SessionStore.markConnected"),
-    );
-
-  const markDisconnected: SessionStore["Service"]["markDisconnected"] = (sessionId) =>
-    Ref.update(connectedSessionsRef, (current) => {
-      const next = new Map(current);
-      const remaining = (next.get(sessionId) ?? 0) - 1;
-      if (remaining > 0) {
-        next.set(sessionId, remaining);
-      } else {
-        next.delete(sessionId);
-      }
-      return next;
-    }).pipe(
-      Effect.flatMap(() => loadActiveSession(sessionId)),
-      Effect.flatMap((session) =>
-        Option.isSome(session) ? emitUpsert(session.value) : Effect.void,
-      ),
-      Effect.catchCause((cause) =>
-        Effect.logError("Failed to publish disconnected-session auth update.").pipe(
-          Effect.annotateLogs({
-            sessionId,
-            cause,
-          }),
-        ),
-      ),
-      Effect.withSpan("SessionStore.markDisconnected"),
-    );
+        Effect.withSpan("SessionStore.markDisconnected"),
+      );
 
   const encodeClaims = Schema.encodeEffect(Schema.fromJsonString(SessionClaims));
   const issue: SessionStore["Service"]["issue"] = Effect.fn("SessionStore.issue")(

@@ -675,6 +675,7 @@ const buildAppUnderTest = (options?: {
       ),
       Layer.provide(
         Layer.mock(TerminalManager.TerminalManager)({
+          releaseSessionControls: () => Effect.void,
           ...options?.layers?.terminalManager,
         }),
       ),
@@ -7400,6 +7401,12 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         layers: {
           terminalManager: {
             open: () => Effect.succeed(snapshot),
+            claimControl: (input) =>
+              Effect.succeed({
+                threadId: input.threadId,
+                terminalId: input.terminalId,
+                control: "controller" as const,
+              }),
             write: () => Effect.void,
             resize: () => Effect.void,
             clear: () => Effect.void,
@@ -7421,6 +7428,17 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         ),
       );
       assert.equal(opened.terminalId, "default");
+
+      const control = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          client[WS_METHODS.terminalClaimControl]({
+            threadId: "thread-1",
+            terminalId: "default",
+            force: false,
+          }),
+        ),
+      );
+      assert.equal(control.control, "controller");
 
       yield* Effect.scoped(
         withWsRpcClient(wsUrl, (client) =>

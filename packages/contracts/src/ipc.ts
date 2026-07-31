@@ -34,8 +34,10 @@ import type {
 import type {
   TerminalAttachInput,
   TerminalAttachStreamEvent,
+  TerminalClaimControlInput,
   TerminalClearInput,
   TerminalCloseInput,
+  TerminalControlState,
   TerminalMetadataStreamEvent,
   TerminalOpenInput,
   TerminalResizeInput,
@@ -1143,6 +1145,9 @@ export interface EnvironmentApi {
         onResubscribe?: () => void;
       },
     ) => () => void;
+    claimControl: (
+      input: typeof TerminalClaimControlInput.Encoded,
+    ) => Promise<TerminalControlState>;
     write: (input: typeof TerminalWriteInput.Encoded) => Promise<void>;
     resize: (input: typeof TerminalResizeInput.Encoded) => Promise<void>;
     clear: (input: typeof TerminalClearInput.Encoded) => Promise<void>;

@@ -20,6 +20,7 @@ function environment(
     environmentId: ENVIRONMENT_ID,
     label: "Julius's MacBook Pro",
     displayUrl: "https://environment.example.test",
+    displayUrls: ["https://environment.example.test"],
     relayManaged: false,
     entry: {
       target: new BearerConnectionTarget({

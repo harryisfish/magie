@@ -10,8 +10,10 @@ import * as RemoteEnvironmentAuthorization from "../authorization/service.ts";
 import * as ManagedRelay from "../relay/managedRelay.ts";
 import * as ClientCapabilities from "../platform/capabilities.ts";
 import {
+  type BearerConnectionEndpoint,
   BearerConnectionCredential,
   BearerConnectionProfile,
+  bearerConnectionProfileEndpoints,
   type ConnectionCatalogEntry,
   SshConnectionProfile,
 } from "./catalog.ts";
@@ -38,6 +40,7 @@ export class ConnectionResolver extends Context.Service<
   {
     readonly prepare: (
       entry: ConnectionCatalogEntry,
+      endpoint?: BearerConnectionEndpoint,
     ) => Effect.Effect<PreparedConnection, ConnectionAttemptError>;
   }
 >()("@t3tools/client-runtime/connection/resolver/ConnectionResolver") {}
@@ -92,6 +95,7 @@ const makeBearerBroker = Effect.fn("clientRuntime.connection.broker.makeBearer")
 
   return Effect.fn("clientRuntime.connection.broker.bearer")(function* (
     entry: ConnectionCatalogEntry & { readonly target: BearerConnectionTarget },
+    endpoint?: BearerConnectionEndpoint,
   ) {
     const target = entry.target;
     const profile = yield* Option.match(entry.profile, {
@@ -121,10 +125,11 @@ const makeBearerBroker = Effect.fn("clientRuntime.connection.broker.makeBearer")
     if (!isBearerCredential(credential)) {
       return yield* credentialMissingError(target.connectionId);
     }
+    const selectedEndpoint = endpoint ?? bearerConnectionProfileEndpoints(profile)[0];
     const authorized = yield* remote.authorizeBearer({
       expectedEnvironmentId: target.environmentId,
-      httpBaseUrl: profile.httpBaseUrl,
-      wsBaseUrl: profile.wsBaseUrl,
+      httpBaseUrl: selectedEndpoint.httpBaseUrl,
+      wsBaseUrl: selectedEndpoint.wsBaseUrl,
       bearerToken: credential.token,
     });
     return {
@@ -249,6 +254,7 @@ export const make = Effect.gen(function* () {
 
   const prepare = Effect.fn("clientRuntime.connection.broker.prepare")(function* (
     entry: ConnectionCatalogEntry,
+    endpoint?: BearerConnectionEndpoint,
   ) {
     const target: ConnectionTarget = entry.target;
     yield* Effect.annotateCurrentSpan({
@@ -259,7 +265,7 @@ export const make = Effect.gen(function* () {
       case "PrimaryConnectionTarget":
         return yield* primary(target);
       case "BearerConnectionTarget":
-        return yield* bearer({ ...entry, target });
+        return yield* bearer({ ...entry, target }, endpoint);
       case "RelayConnectionTarget":
         return yield* relay(target);
       case "SshConnectionTarget":

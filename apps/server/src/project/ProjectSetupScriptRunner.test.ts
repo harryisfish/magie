@@ -53,7 +53,9 @@ const makeTerminalManagerLayer = (
   Layer.succeed(TerminalManager.TerminalManager, {
     ...overrides,
     attachStream: () => Effect.die(new Error("unused")),
+    claimControl: () => Effect.die(new Error("unused")),
     resize: () => Effect.void,
+    releaseSessionControls: () => Effect.void,
     clear: () => Effect.void,
     restart: () => Effect.die(new Error("unused")),
     close: () => Effect.void,
@@ -134,21 +136,27 @@ describe("ProjectSetupScriptRunner", () => {
           terminalId: "setup-setup",
           cwd: "/repo/worktrees/a",
         });
-        expect(open).toHaveBeenCalledWith({
-          threadId: "thread-1",
-          terminalId: "setup-setup",
-          cwd: "/repo/worktrees/a",
-          worktreePath: "/repo/worktrees/a",
-          env: {
-            T3CODE_PROJECT_ROOT: "/repo/project",
-            T3CODE_WORKTREE_PATH: "/repo/worktrees/a",
+        expect(open).toHaveBeenCalledWith(
+          {
+            threadId: "thread-1",
+            terminalId: "setup-setup",
+            cwd: "/repo/worktrees/a",
+            worktreePath: "/repo/worktrees/a",
+            env: {
+              T3CODE_PROJECT_ROOT: "/repo/project",
+              T3CODE_WORKTREE_PATH: "/repo/worktrees/a",
+            },
           },
-        });
-        expect(write).toHaveBeenCalledWith({
-          threadId: "thread-1",
-          terminalId: "setup-setup",
-          data: "bun install\r",
-        });
+          null,
+        );
+        expect(write).toHaveBeenCalledWith(
+          {
+            threadId: "thread-1",
+            terminalId: "setup-setup",
+            data: "bun install\r",
+          },
+          null,
+        );
       }).pipe(Effect.provide(testLayer(project, { open, write })));
     },
   );

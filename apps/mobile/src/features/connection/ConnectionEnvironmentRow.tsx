@@ -3,6 +3,7 @@ import { connectionStatusText } from "@t3tools/client-runtime/connection";
 import type { AtomCommandResult } from "@t3tools/client-runtime/state/runtime";
 import type { EnvironmentId } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
+import * as Option from "effect/Option";
 import { AsyncResult } from "effect/unstable/reactivity";
 import { useCallback, useState } from "react";
 import { Alert, Pressable, View } from "react-native";
@@ -13,6 +14,7 @@ import { AppText as Text, AppTextInput as TextInput } from "../../components/App
 import { cn } from "../../lib/cn";
 import { copyTextWithHaptic } from "../../lib/copyTextWithHaptic";
 import type { ConnectedEnvironmentSummary } from "../../state/remote-runtime-types";
+import { usePreparedConnection } from "../../state/session";
 import { ConnectionStatusDot } from "./ConnectionStatusDot";
 
 function connectionStatusLabel(environment: ConnectedEnvironmentSummary): string | null {
@@ -26,6 +28,7 @@ function connectionStatusLabel(environment: ConnectedEnvironmentSummary): string
 export function ConnectionEnvironmentRow(props: {
   readonly environment: ConnectedEnvironmentSummary;
   readonly expanded: boolean;
+  readonly hideActiveEndpoint?: boolean;
   readonly onToggle: () => void;
   readonly onReconnect: (environmentId: EnvironmentId) => void;
   readonly onRemove: (environmentId: EnvironmentId) => void;
@@ -35,7 +38,11 @@ export function ConnectionEnvironmentRow(props: {
   ) => Promise<AtomCommandResult<unknown, unknown>>;
 }) {
   const [label, setLabel] = useState(props.environment.environmentLabel);
-  const [url, setUrl] = useState(props.environment.displayUrl);
+  const [url, setUrl] = useState(props.environment.displayUrls.join("\n"));
+  const prepared = usePreparedConnection(props.environment.environmentId);
+  const activeHttpBaseUrl = props.hideActiveEndpoint
+    ? null
+    : (Option.getOrNull(prepared)?.httpBaseUrl ?? null);
 
   const mutedColor = useThemeColor("--color-icon-subtle");
   const primaryFg = useThemeColor("--color-primary-foreground");
@@ -80,7 +87,17 @@ export function ConnectionEnvironmentRow(props: {
           </Text>
           <Text className="text-xs text-foreground-muted" numberOfLines={1}>
             {props.environment.displayUrl}
+            {props.environment.displayUrls.length > 1
+              ? ` · +${props.environment.displayUrls.length - 1} fallback`
+              : ""}
           </Text>
+          {props.environment.connectionState === "connected" &&
+          activeHttpBaseUrl !== null &&
+          activeHttpBaseUrl !== props.environment.displayUrl ? (
+            <Text className="text-xs text-foreground-muted" numberOfLines={1}>
+              Connected via {activeHttpBaseUrl}
+            </Text>
+          ) : null}
           {statusLabel ? (
             <Text
               className={cn(
@@ -153,16 +170,19 @@ export function ConnectionEnvironmentRow(props: {
 
               <View className="gap-1.5">
                 <Text className="text-2xs font-t3-bold tracking-[0.8px] uppercase text-foreground-muted">
-                  URL
+                  URLs (one per line)
                 </Text>
                 <TextInput
                   autoCapitalize="none"
                   autoCorrect={false}
                   keyboardType="url"
-                  placeholder="192.168.1.100:8080"
+                  multiline
+                  numberOfLines={3}
+                  placeholder={"http://192.168.1.100:3773\nhttps://dev.example.com"}
                   value={url}
                   onChangeText={setUrl}
-                  className="rounded-[14px] border border-input-border bg-input px-4 py-3 text-base text-foreground"
+                  className="min-h-24 rounded-[14px] border border-input-border bg-input px-4 py-3 text-base text-foreground"
+                  style={{ textAlignVertical: "top" }}
                 />
               </View>
             </>

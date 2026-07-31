@@ -96,6 +96,12 @@ describe("connection onboarding", () => {
           connectionId: "bearer:environment-paired",
           httpBaseUrl: "https://remote.example.test/",
           wsBaseUrl: "wss://remote.example.test/",
+          endpoints: [
+            {
+              httpBaseUrl: "https://remote.example.test/",
+              wsBaseUrl: "wss://remote.example.test/",
+            },
+          ],
         },
         credential: {
           token: "bearer-token",
@@ -168,7 +174,17 @@ describe("connection onboarding", () => {
         input: {
           environmentId,
           label: "  Renamed environment  ",
-          httpBaseUrl: "http://100.65.180.100:3773/path",
+          httpBaseUrls: [
+            "http://100.65.180.100:3773/path",
+            "https://public.example.test",
+            "http://100.65.180.100:3773/path",
+            "https://public.example.test",
+            "http://100.65.180.100:3773/path",
+            "https://public.example.test",
+            "http://100.65.180.100:3773/path",
+            "https://public.example.test",
+            "http://100.65.180.100:3773/path",
+          ],
         },
         entry: Option.some({
           target: new BearerConnectionTarget({
@@ -200,8 +216,96 @@ describe("connection onboarding", () => {
           label: "Renamed environment",
           httpBaseUrl: "http://100.65.180.100:3773/",
           wsBaseUrl: "ws://100.65.180.100:3773/",
+          endpoints: [
+            {
+              httpBaseUrl: "http://100.65.180.100:3773/",
+              wsBaseUrl: "ws://100.65.180.100:3773/",
+            },
+            {
+              httpBaseUrl: "https://public.example.test/",
+              wsBaseUrl: "wss://public.example.test/",
+            },
+          ],
         },
         credential: { token: "bearer-token" },
+      });
+    }),
+  );
+
+  it.effect("requires at least one bearer endpoint", () =>
+    Effect.gen(function* () {
+      const environmentId = EnvironmentId.make("environment-paired");
+      const error = yield* prepareBearerConnectionUpdate({
+        input: {
+          environmentId,
+          label: "Environment",
+          httpBaseUrls: ["", "  "],
+        },
+        entry: Option.some({
+          target: new BearerConnectionTarget({
+            environmentId,
+            label: "Environment",
+            connectionId: "bearer:environment-paired",
+          }),
+          profile: Option.some(
+            new BearerConnectionProfile({
+              connectionId: "bearer:environment-paired",
+              environmentId,
+              label: "Environment",
+              httpBaseUrl: "http://old.example.test/",
+              wsBaseUrl: "ws://old.example.test/",
+            }),
+          ),
+        }),
+        credential: Option.some(new BearerConnectionCredential({ token: "bearer-token" })),
+      }).pipe(Effect.flip);
+
+      expect(error).toMatchObject({
+        _tag: "ConnectionBlockedError",
+        reason: "configuration",
+        message: "At least one environment URL is required.",
+      });
+    }),
+  );
+
+  it.effect("accepts eight unique bearer endpoints and rejects a ninth", () =>
+    Effect.gen(function* () {
+      const environmentId = EnvironmentId.make("environment-paired");
+      const entry = Option.some({
+        target: new BearerConnectionTarget({
+          environmentId,
+          label: "Environment",
+          connectionId: "bearer:environment-paired",
+        }),
+        profile: Option.some(
+          new BearerConnectionProfile({
+            connectionId: "bearer:environment-paired",
+            environmentId,
+            label: "Environment",
+            httpBaseUrl: "http://old.example.test/",
+            wsBaseUrl: "ws://old.example.test/",
+          }),
+        ),
+      });
+      const credential = Option.some(new BearerConnectionCredential({ token: "bearer-token" }));
+      const urls = Array.from({ length: 9 }, (_, index) => `https://host-${index}.example.test`);
+
+      const accepted = yield* prepareBearerConnectionUpdate({
+        input: { environmentId, label: "Environment", httpBaseUrls: urls.slice(0, 8) },
+        entry,
+        credential,
+      });
+      expect(accepted.profile.endpoints).toHaveLength(8);
+
+      const error = yield* prepareBearerConnectionUpdate({
+        input: { environmentId, label: "Environment", httpBaseUrls: urls },
+        entry,
+        credential,
+      }).pipe(Effect.flip);
+      expect(error).toMatchObject({
+        _tag: "ConnectionBlockedError",
+        reason: "configuration",
+        message: "A saved environment supports at most 8 URLs.",
       });
     }),
   );

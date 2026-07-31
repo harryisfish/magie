@@ -59,6 +59,7 @@ function makeKnownSession(input: {
       buffer: "",
       status: input.status,
       error: null,
+      control: "available",
       hasRunningSubprocess: false,
       updatedAt: input.updatedAt ?? "2026-04-15T20:00:00.000Z",
       version: 1,

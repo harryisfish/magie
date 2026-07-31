@@ -16,14 +16,48 @@ const ConnectionProfileBase = {
   label: Schema.String,
 };
 
+export const MAX_BEARER_CONNECTION_ENDPOINTS = 8;
+
+export const BearerConnectionEndpoint = Schema.Struct({
+  httpBaseUrl: Schema.String,
+  wsBaseUrl: Schema.String,
+});
+export type BearerConnectionEndpoint = typeof BearerConnectionEndpoint.Type;
+
 export class BearerConnectionProfile extends Schema.TaggedClass<BearerConnectionProfile>()(
   "BearerConnectionProfile",
   {
     ...ConnectionProfileBase,
     httpBaseUrl: Schema.String,
     wsBaseUrl: Schema.String,
+    endpoints: Schema.optional(
+      Schema.NonEmptyArray(BearerConnectionEndpoint).check(
+        Schema.isMaxLength(MAX_BEARER_CONNECTION_ENDPOINTS),
+      ),
+    ),
   },
 ) {}
+
+export function bearerConnectionProfileEndpoints(
+  profile: BearerConnectionProfile,
+): readonly [BearerConnectionEndpoint, ...BearerConnectionEndpoint[]] {
+  const legacyEndpoint = {
+    httpBaseUrl: profile.httpBaseUrl,
+    wsBaseUrl: profile.wsBaseUrl,
+  };
+  if (profile.endpoints === undefined) return [legacyEndpoint];
+  return [
+    legacyEndpoint,
+    ...profile.endpoints.filter(
+      (endpoint) =>
+        endpoint.httpBaseUrl !== legacyEndpoint.httpBaseUrl ||
+        endpoint.wsBaseUrl !== legacyEndpoint.wsBaseUrl,
+    ),
+  ].slice(0, MAX_BEARER_CONNECTION_ENDPOINTS) as [
+    BearerConnectionEndpoint,
+    ...BearerConnectionEndpoint[],
+  ];
+}
 
 export class SshConnectionProfile extends Schema.TaggedClass<SshConnectionProfile>()(
   "SshConnectionProfile",

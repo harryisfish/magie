@@ -261,7 +261,9 @@ describe("ConnectionResolver", () => {
 
   it.effect("uses the registered bearer profile without re-reading the profile store", () =>
     Effect.gen(function* () {
-      const bearerInputs = yield* Ref.make<ReadonlyArray<string>>([]);
+      const bearerInputs = yield* Ref.make<
+        ReadonlyArray<{ readonly token: string; readonly httpBaseUrl: string }>
+      >([]);
       const target = new BearerConnectionTarget({
         environmentId: ENVIRONMENT_ID,
         label: "Saved",
@@ -273,11 +275,21 @@ describe("ConnectionResolver", () => {
         label: "Saved",
         httpBaseUrl: ENDPOINT.httpBaseUrl,
         wsBaseUrl: ENDPOINT.wsBaseUrl,
+        endpoints: [
+          ENDPOINT,
+          {
+            httpBaseUrl: "https://public.example.test",
+            wsBaseUrl: "wss://public.example.test",
+          },
+        ],
       });
       const brokerLayer = yield* makeDependencies({
         credentials: [["saved-1", new BearerConnectionCredential({ token: "secret-bearer" })]],
         authorizeBearer: (input) =>
-          Ref.update(bearerInputs, (values) => [...values, input.bearerToken]).pipe(
+          Ref.update(bearerInputs, (values) => [
+            ...values,
+            { token: input.bearerToken, httpBaseUrl: input.httpBaseUrl },
+          ]).pipe(
             Effect.as({
               environmentId: input.expectedEnvironmentId,
               label: "Saved",
@@ -293,9 +305,12 @@ describe("ConnectionResolver", () => {
       const broker = yield* ConnectionResolver.ConnectionResolver.pipe(Effect.provide(brokerLayer));
 
       expect(
-        (yield* broker.prepare(catalogEntry(target, Option.some(profile)))).socketUrl,
+        (yield* broker.prepare(catalogEntry(target, Option.some(profile)), profile.endpoints?.[1]))
+          .socketUrl,
       ).toContain("wsTicket=ticket");
-      expect(yield* Ref.get(bearerInputs)).toEqual(["secret-bearer"]);
+      expect(yield* Ref.get(bearerInputs)).toEqual([
+        { token: "secret-bearer", httpBaseUrl: "https://public.example.test" },
+      ]);
     }),
   );
 

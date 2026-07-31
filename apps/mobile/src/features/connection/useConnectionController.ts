@@ -100,7 +100,7 @@ export function useConnectionController() {
       updateBearer({
         environmentId,
         label: updates.label,
-        httpBaseUrl: updates.displayUrl,
+        httpBaseUrls: updates.displayUrl.split(/\r?\n/u),
       }),
     [updateBearer],
   );

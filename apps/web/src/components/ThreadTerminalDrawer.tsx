@@ -290,6 +290,9 @@ export function TerminalViewport({
   const runTerminalResize = useAtomCommand(terminalEnvironment.resize, {
     reportFailure: false,
   });
+  const runClaimTerminalControl = useAtomCommand(terminalEnvironment.claimControl, {
+    reportFailure: false,
+  });
   const hasHandledExitRef = useRef(false);
   const selectionPointerRef = useRef<{ x: number; y: number } | null>(null);
   const selectionGestureActiveRef = useRef(false);
@@ -330,6 +333,17 @@ export function TerminalViewport({
   const terminalBuffer = terminalSession.buffer;
   const terminalError = terminalSession.error;
   const terminalStatus = terminalSession.status;
+  const terminalControl = terminalSession.control;
+  const latestControlRef = useRef(terminalControl);
+  latestControlRef.current = terminalControl;
+  const defaultClaimedTerminalRef = useRef<string | null>(null);
+  const terminalControlKey = `${environmentId}:${threadId}:${terminalId}`;
+  const claimTerminalControl = useEffectEvent((force: boolean) =>
+    runClaimTerminalControl({
+      environmentId,
+      input: { threadId, terminalId, force },
+    }),
+  );
   const synchronizedStatusRef = useRef<TerminalSessionState["status"]>("closed");
   const synchronizeTerminalStatus = useEffectEvent(
     (terminal: GhosttyTerminalSurface, status: TerminalSessionState["status"]) => {
@@ -381,7 +395,9 @@ export function TerminalViewport({
       const terminalOptions: GhosttyTerminalSurfaceOptions = {
         theme: terminalThemeFromApp(mount),
         onData: (data) => handleData(data),
-        onResize: (cols, rows) => void resizeTerminal(cols, rows),
+        onResize: (cols, rows) => {
+          if (latestControlRef.current === "controller") void resizeTerminal(cols, rows);
+        },
         onSelectionChange: () => handleSelectionChange(),
         onCopy: (text) => handleCopy(text),
         beforeKey: (event) => handleBeforeKey(event),
@@ -512,6 +528,7 @@ export function TerminalViewport({
       };
 
       const sendTerminalInput = async (data: string, fallbackError: string) => {
+        if (latestControlRef.current !== "controller") return;
         const activeTerminal = terminalRef.current;
         if (!activeTerminal) return;
         const result = await writeTerminal(data);
@@ -614,6 +631,7 @@ export function TerminalViewport({
       }
 
       function handleData(data: string): void {
+        if (latestControlRef.current !== "controller") return;
         void (async () => {
           const result = await writeTerminal(data);
           if (result._tag === "Success" || isAtomCommandInterrupted(result)) return;
@@ -763,6 +781,34 @@ export function TerminalViewport({
   }, [autoFocus, terminalBuffer, terminalError, terminalStatus, terminalVersion]);
 
   useEffect(() => {
+    if (terminalVersion === 0) return;
+    if (terminalStatus !== "running") {
+      if (
+        (terminalStatus === "closed" ||
+          terminalStatus === "exited" ||
+          terminalStatus === "error") &&
+        defaultClaimedTerminalRef.current === terminalControlKey
+      ) {
+        defaultClaimedTerminalRef.current = null;
+      }
+      return;
+    }
+    if (defaultClaimedTerminalRef.current === terminalControlKey) return;
+    defaultClaimedTerminalRef.current = terminalControlKey;
+    if (terminalControl === "available") {
+      void claimTerminalControl(false);
+    }
+  }, [terminalControl, terminalControlKey, terminalStatus, terminalVersion]);
+
+  useEffect(() => {
+    if (terminalControl !== "controller") return;
+    const terminal = terminalRef.current;
+    if (!terminal) return;
+    const frame = window.requestAnimationFrame(() => terminal.fit());
+    return () => window.cancelAnimationFrame(frame);
+  }, [terminalControl]);
+
+  useEffect(() => {
     if (!autoFocus) return;
     const terminal = terminalRef.current;
     if (!terminal) return;
@@ -791,10 +837,32 @@ export function TerminalViewport({
     };
   }, [drawerHeight, environmentId, resizeEpoch, terminalId, threadId]);
   return (
-    <div
-      ref={containerRef}
-      className="relative h-full w-full overflow-hidden rounded-[4px] bg-background"
-    />
+    <div className="relative h-full w-full overflow-hidden rounded-[4px] bg-background">
+      <div ref={containerRef} className="absolute inset-0" />
+      {terminalStatus === "running" && terminalVersion > 0 && terminalControl !== "controller" ? (
+        <div className="absolute inset-0 z-10 flex items-center justify-center bg-background/55 backdrop-blur-[1px]">
+          <div className="flex max-w-xs flex-col items-center gap-3 rounded-lg border border-border bg-background/95 px-5 py-4 text-center shadow-lg">
+            <p className="text-sm font-medium text-foreground">
+              {terminalControl === "observer"
+                ? "Another client is controlling this terminal"
+                : "This terminal is ready to control"}
+            </p>
+            <p className="text-xs text-muted-foreground">
+              {terminalControl === "observer"
+                ? "Output stays live here. Take control to type or resize the terminal."
+                : "Take control to type or resize the terminal."}
+            </p>
+            <button
+              type="button"
+              className="rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:bg-primary/90"
+              onClick={() => void claimTerminalControl(terminalControl === "observer")}
+            >
+              Take control
+            </button>
+          </div>
+        </div>
+      ) : null}
+    </div>
   );
 }
 

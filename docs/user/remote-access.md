@@ -60,6 +60,20 @@ If the copied link points directly at `http://192.168.x.y:3773`, open it from a 
 
 In the mobile app's **Add Environment** form, a numeric IP address without a scheme uses HTTP. Include `https://` explicitly when the backend is served over HTTPS.
 
+### Saving Fallback URLs
+
+For a manually paired environment, open its entry in **Settings** → **Connections** on web or
+desktop, or **Settings** → **Environments** on mobile. Enter one URL per line in the order you want
+T3 Code to try them. A common setup puts a fast LAN or Tailnet URL first and a public HTTPS URL
+second. You can save up to eight unique normalized URLs. Existing single-URL environments keep
+working without migration.
+
+All URLs still refer to one saved Environment, so projects, threads, and terminals keep the same
+identity when the route changes. T3 Code tries the next URL only for network, timeout, transport, or
+endpoint-unavailable failures. Authentication, permission, configuration, and Environment identity
+errors stop immediately instead of probing another address. The Environment row shows the endpoint
+used by the active connection.
+
 ### Tailscale Endpoints
 
 When the desktop app can detect Tailscale, it adds Tailnet endpoints to the reachable endpoint list.
@@ -166,6 +180,21 @@ nvm alias default 24
 With mise, asdf, fnm, or nodenv, make sure the tool's shim directory is installed and resolves to a Node version satisfying the range above without an interactive shell.
 
 If reconnecting after an app update fails, retry the SSH launch once. The launcher now compares its generated runner script, stops stale launcher-managed remote servers, clears the SSH launch PID/port state, and starts a fresh remote server. You should not normally need to delete `~/.t3/ssh-launch` or kill `t3` processes manually.
+
+## Using One Terminal from Multiple Devices
+
+Web, desktop, and mobile can display the same Terminal at the same time. Every attached client gets
+the current scrollback snapshot and continues receiving live output.
+
+Only the controlling client can type or change the Terminal size. The first active view can claim an
+uncontrolled Terminal without interrupting anyone. Other clients cannot type or resize and show a
+**Take control** action; using it transfers control immediately, while output remains visible on all
+devices. Closing one connection does not release control while another connection from the same
+paired client remains open. Control becomes available after that paired client's last connection
+closes.
+
+Terminal processes still belong to the running T3 Code server. Restarting or stopping that server
+ends its live PTYs; cross-restart Terminal persistence is not provided by this behavior.
 
 ## Updating a Remote Server
 

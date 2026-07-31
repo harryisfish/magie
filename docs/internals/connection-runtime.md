@@ -18,7 +18,10 @@ supply. There is no legacy connection owner or supported mixed mode.
 - `ConnectionResolver` ([resolver.ts][resolver]) resolves a catalog entry into a
   prepared, authenticated endpoint for primary, bearer, relay, or SSH targets.
 - `ConnectionDriver` ([driver.ts][driver]) prepares through the resolver, opens
-  one RPC session, and reports `preparing`, `opening`, and `synchronizing`.
+  candidate-scoped RPC sessions until one is ready, and reports `preparing`,
+  `opening`, and `synchronizing`. A bearer profile may provide ordered endpoint
+  candidates; the driver gives each candidate its own setup budget, closes a
+  failed candidate's scope before trying the next one, and returns one lease.
 - `RpcSessionFactory` ([rpc/session.ts][session]) performs one transport
   attempt. It does not retry. `RpcSession` is the interface it returns,
   exposing `client`, `initialConfig`, `ready`, `probe`, and `closed`.
@@ -57,6 +60,14 @@ The supervisor is the only retry owner.
 7. Explicit removal closes the session and deletes the registration,
    credentials, shell cache, and thread cache.
 
+For a bearer target, endpoint rotation happens inside one supervisor attempt.
+`network`, `timeout`, `transport`, and `endpoint-unavailable` failures may move
+to the next saved endpoint. Authentication, permission, configuration,
+unsupported, `remote-unavailable`, and `relay-unavailable` failures return to
+the supervisor immediately. The initial `server.getConfig` response must match
+the saved `environmentId`; a mismatch is blocked even if HTTP authorization
+against that endpoint succeeded.
+
 ### Wakeups
 
 Wakeup handling differs by phase, in [supervisor.ts][supervisor]:
@@ -89,6 +100,11 @@ the initial config RPC succeeds, proving that the server is responsive. Shell
 and thread synchronization are independent data states. A healthy RPC transport
 with a failed shell subscription is shown as connected with a synchronization
 error, not as a reconnect that is not actually scheduled.
+
+The supervisor's prepared-connection projection records the endpoint selected
+by the successful attempt. Clients use that value for active HTTP requests and
+for the user-visible “Connected via” endpoint, while the catalog keeps the full
+ordered list for editing and future reconnects.
 
 ## Data Boundary
 
@@ -173,6 +189,10 @@ Required coverage includes:
 - shell and thread cache hydration;
 - durable subscriptions switching sessions;
 - command metadata and idempotent queued-command metadata.
+- legacy single-endpoint bearer documents and ordered multi-endpoint storage;
+- prepare, WebSocket-open, and initial-sync endpoint failures;
+- non-rotating blocked and remote-unavailable failures;
+- WebSocket Environment identity mismatch.
 
 [layer]: ../../packages/client-runtime/src/connection/layer.ts
 [resolver]: ../../packages/client-runtime/src/connection/resolver.ts

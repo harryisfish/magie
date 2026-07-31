@@ -118,6 +118,7 @@ import { environmentCatalog } from "~/connection/catalog";
 import {
   connectPairing as connectPairingAtom,
   connectSshEnvironment as connectSshEnvironmentAtom,
+  updateBearerConnection as updateBearerConnectionAtom,
 } from "~/connection/onboarding";
 import { useEnvironmentQuery } from "~/state/query";
 import {
@@ -129,6 +130,7 @@ import { desktopWslStateAtom, refreshDesktopWslState } from "~/state/desktopWslS
 import {
   type EnvironmentPresentation,
   useEnvironments,
+  useEnvironmentHttpBaseUrl,
   usePrimaryEnvironment,
 } from "~/state/environments";
 import { useAtomCommand } from "../../state/use-atom-command";
@@ -1343,6 +1345,10 @@ type SavedBackendListRowProps = {
   removingEnvironmentId: EnvironmentId | null;
   onConnect: (environmentId: EnvironmentId) => void;
   onRemove: (environmentId: EnvironmentId) => void;
+  onUpdate: (
+    environmentId: EnvironmentId,
+    input: { readonly label: string; readonly httpBaseUrls: ReadonlyArray<string> },
+  ) => Promise<string | null>;
 };
 
 function SavedBackendListRow({
@@ -1350,8 +1356,10 @@ function SavedBackendListRow({
   removingEnvironmentId,
   onConnect,
   onRemove,
+  onUpdate,
 }: SavedBackendListRowProps) {
   const environmentId = environment.environmentId;
+  const activeHttpBaseUrl = useEnvironmentHttpBaseUrl(environmentId);
   const connectionState = environment.connection.phase;
   const isConnected = connectionState === "connected";
   const isConnecting = connectionState === "connecting" || connectionState === "reconnecting";
@@ -1400,9 +1408,17 @@ function SavedBackendListRow({
     environment.entry.profile.value._tag === "SshConnectionProfile"
       ? environment.entry.profile.value.target
       : null;
+  const isBearerEnvironment =
+    environment.entry.target._tag === "BearerConnectionTarget" &&
+    Option.isSome(environment.entry.profile) &&
+    environment.entry.profile.value._tag === "BearerConnectionProfile";
   const metadataBits = [
+    isBearerEnvironment && isConnected && activeHttpBaseUrl !== null
+      ? `Connected via ${activeHttpBaseUrl}`
+      : environment.displayUrl,
     sshTarget ? `SSH ${formatDesktopSshTarget(sshTarget)}` : null,
     environment.relayManaged ? "T3 Connect" : null,
+    environment.displayUrls.length > 1 ? `${environment.displayUrls.length} endpoints` : null,
   ].filter((value): value is string => value !== null);
 
   // The WSL backend is a desktop-managed local backend (it surfaces as a bearer
@@ -1410,6 +1426,34 @@ function SavedBackendListRow({
   // environment you connect to or remove here — its lifecycle is driven by the
   // WSL on/off + distro picker on this page.
   const isWslEnvironment = isDesktopLocalConnectionTarget(environment.entry.target);
+  const [editOpen, setEditOpen] = useState(false);
+  const [editLabel, setEditLabel] = useState(environment.label);
+  const [editUrls, setEditUrls] = useState(environment.displayUrls.join("\n"));
+  const [editError, setEditError] = useState<string | null>(null);
+  const [isUpdating, setIsUpdating] = useState(false);
+  const handleEditOpenChange = (open: boolean) => {
+    if (isUpdating) return;
+    setEditOpen(open);
+    if (open) {
+      setEditLabel(environment.label);
+      setEditUrls(environment.displayUrls.join("\n"));
+      setEditError(null);
+    }
+  };
+  const handleUpdate = async () => {
+    setIsUpdating(true);
+    setEditError(null);
+    const error = await onUpdate(environmentId, {
+      label: editLabel,
+      httpBaseUrls: editUrls.split(/\r?\n/u),
+    });
+    setIsUpdating(false);
+    if (error !== null) {
+      setEditError(error);
+      return;
+    }
+    setEditOpen(false);
+  };
 
   return (
     <div className={ITEM_ROW_CLASSNAME}>
@@ -1485,6 +1529,67 @@ function SavedBackendListRow({
             </Tooltip>
           ) : (
             <>
+              {isBearerEnvironment ? (
+                <Dialog open={editOpen} onOpenChange={handleEditOpenChange}>
+                  <DialogTrigger
+                    render={
+                      <Button
+                        size="xs"
+                        variant="outline"
+                        disabled={removingEnvironmentId === environmentId}
+                      />
+                    }
+                  >
+                    Edit
+                  </DialogTrigger>
+                  <DialogPopup className="max-w-md">
+                    <DialogHeader>
+                      <DialogTitle>Edit environment</DialogTitle>
+                      <DialogDescription>
+                        URLs are tried in order. Put the LAN address first and the public address
+                        after it.
+                      </DialogDescription>
+                    </DialogHeader>
+                    <DialogPanel className="space-y-4">
+                      <label className="block">
+                        <span className="mb-1.5 block text-xs font-medium text-foreground">
+                          Label
+                        </span>
+                        <Input
+                          value={editLabel}
+                          onChange={(event) => setEditLabel(event.target.value)}
+                          disabled={isUpdating}
+                        />
+                      </label>
+                      <label className="block">
+                        <span className="mb-1.5 block text-xs font-medium text-foreground">
+                          URLs (one per line)
+                        </span>
+                        <Textarea
+                          value={editUrls}
+                          onChange={(event) => setEditUrls(event.target.value)}
+                          rows={4}
+                          placeholder={"http://192.168.1.100:3773\nhttps://dev.example.com"}
+                          disabled={isUpdating}
+                          spellCheck={false}
+                        />
+                      </label>
+                      {editError ? <p className="text-xs text-destructive">{editError}</p> : null}
+                    </DialogPanel>
+                    <DialogFooter>
+                      <DialogClose
+                        disabled={isUpdating}
+                        render={<Button variant="outline" disabled={isUpdating} />}
+                      >
+                        Cancel
+                      </DialogClose>
+                      <Button onClick={() => void handleUpdate()} disabled={isUpdating}>
+                        {isUpdating ? "Saving…" : "Save"}
+                      </Button>
+                    </DialogFooter>
+                  </DialogPopup>
+                </Dialog>
+              ) : null}
               {!isConnected ? (
                 <Button
                   size="xs"
@@ -1729,6 +1834,9 @@ export function ConnectionsSettings() {
   const primaryEnvironment = usePrimaryEnvironment();
   const connectPairing = useAtomCommand(connectPairingAtom, { reportFailure: false });
   const connectSshEnvironment = useAtomCommand(connectSshEnvironmentAtom, {
+    reportFailure: false,
+  });
+  const updateBearerEnvironment = useAtomCommand(updateBearerConnectionAtom, {
     reportFailure: false,
   });
   const removeEnvironment = useAtomCommand(environmentCatalog.remove, { reportFailure: false });
@@ -2265,6 +2373,27 @@ export function ConnectionsSettings() {
       }
     },
     [removeEnvironment],
+  );
+
+  const handleUpdateSavedBackend = useCallback(
+    async (
+      environmentId: EnvironmentId,
+      input: { readonly label: string; readonly httpBaseUrls: ReadonlyArray<string> },
+    ) => {
+      const result = await updateBearerEnvironment({ environmentId, ...input });
+      if (result._tag === "Success") {
+        toastManager.add({
+          type: "success",
+          title: "Environment updated",
+          description: "The saved endpoints will be tried in order.",
+        });
+        return null;
+      }
+      if (isAtomCommandInterrupted(result)) return "The update was interrupted.";
+      const error = squashAtomCommandFailure(result);
+      return error instanceof Error ? error.message : "Failed to update environment.";
+    },
+    [updateBearerEnvironment],
   );
 
   const handleConnectSshHost = useCallback(
@@ -3421,6 +3550,7 @@ export function ConnectionsSettings() {
             removingEnvironmentId={removingSavedEnvironmentId}
             onConnect={handleConnectSavedBackend}
             onRemove={handleRemoveSavedBackend}
+            onUpdate={handleUpdateSavedBackend}
           />
         ))}
         <CloudRemoteEnvironmentRows

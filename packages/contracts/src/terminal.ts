@@ -30,7 +30,7 @@ export const TerminalThreadInput = Schema.Struct({
 export type TerminalThreadInput = typeof TerminalThreadInput.Type;
 
 /** Terminal ids are ALWAYS chosen by the client and sent explicitly — no server-side allocation. */
-const TerminalSessionInput = Schema.Struct({
+export const TerminalSessionInput = Schema.Struct({
   ...TerminalThreadInput.fields,
   terminalId: TerminalIdSchema,
 });
@@ -69,6 +69,21 @@ export const TerminalResizeInput = Schema.Struct({
   rows: TerminalRowsSchema,
 });
 export type TerminalResizeInput = Schema.Codec.Encoded<typeof TerminalResizeInput>;
+
+export const TerminalClaimControlInput = Schema.Struct({
+  ...TerminalSessionInput.fields,
+  force: Schema.optional(Schema.Boolean),
+});
+export type TerminalClaimControlInput = Schema.Codec.Encoded<typeof TerminalClaimControlInput>;
+
+export const TerminalControlRole = Schema.Literals(["available", "controller", "observer"]);
+export type TerminalControlRole = typeof TerminalControlRole.Type;
+
+export const TerminalControlState = Schema.Struct({
+  ...TerminalSessionInput.fields,
+  control: TerminalControlRole,
+});
+export type TerminalControlState = typeof TerminalControlState.Type;
 
 export const TerminalClearInput = TerminalSessionInput;
 export type TerminalClearInput = Schema.Codec.Encoded<typeof TerminalClearInput>;
@@ -218,6 +233,12 @@ export type TerminalEvent = typeof TerminalEvent.Type;
 const TerminalAttachSnapshotEvent = Schema.Struct({
   type: Schema.Literal("snapshot"),
   snapshot: TerminalSessionSnapshot,
+  control: TerminalControlRole,
+});
+
+const TerminalControlChangedEvent = Schema.Struct({
+  type: Schema.Literal("control"),
+  ...TerminalControlState.fields,
 });
 
 export const TerminalAttachStreamEvent = Schema.Union([
@@ -229,6 +250,7 @@ export const TerminalAttachStreamEvent = Schema.Union([
   TerminalClearedEvent,
   TerminalRestartedEvent,
   TerminalActivityEvent,
+  TerminalControlChangedEvent,
 ]);
 export type TerminalAttachStreamEvent = typeof TerminalAttachStreamEvent.Type;
 
@@ -341,6 +363,18 @@ export class TerminalResizeError extends Schema.TaggedErrorClass<TerminalResizeE
   }
 }
 
+export class TerminalControlError extends Schema.TaggedErrorClass<TerminalControlError>()(
+  "TerminalControlError",
+  {
+    threadId: Schema.String,
+    terminalId: Schema.String,
+  },
+) {
+  override get message() {
+    return `Terminal control is not held by this client for thread: ${this.threadId}, terminal: ${this.terminalId}`;
+  }
+}
+
 export const TerminalError = Schema.Union([
   TerminalCwdError,
   TerminalHistoryError,
@@ -348,5 +382,6 @@ export const TerminalError = Schema.Union([
   TerminalNotRunningError,
   TerminalWriteError,
   TerminalResizeError,
+  TerminalControlError,
 ]);
 export type TerminalError = typeof TerminalError.Type;

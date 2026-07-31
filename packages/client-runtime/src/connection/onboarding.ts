@@ -13,9 +13,11 @@ import { deriveWsBaseUrl, normalizeHttpBaseUrl } from "../environment/endpoint.t
 import { fetchRemoteEnvironmentDescriptor } from "../environment/descriptor.ts";
 import * as ClientCapabilities from "../platform/capabilities.ts";
 import {
+  type BearerConnectionEndpoint,
   BearerConnectionCredential,
   BearerConnectionProfile,
   BearerConnectionRegistration,
+  MAX_BEARER_CONNECTION_ENDPOINTS,
   type ConnectionCatalogEntry,
   type ConnectionCredential,
   SshConnectionProfile,
@@ -46,7 +48,7 @@ export interface SshConnectionInput {
 export interface BearerConnectionUpdateInput {
   readonly environmentId: EnvironmentId;
   readonly label: string;
-  readonly httpBaseUrl: string;
+  readonly httpBaseUrls: ReadonlyArray<string>;
 }
 
 export class ConnectionOnboarding extends Context.Service<
@@ -111,6 +113,12 @@ export const preparePairingRegistration = Effect.fn(
       label: descriptor.label,
       httpBaseUrl: target.httpBaseUrl,
       wsBaseUrl: target.wsBaseUrl,
+      endpoints: [
+        {
+          httpBaseUrl: target.httpBaseUrl,
+          wsBaseUrl: target.wsBaseUrl,
+        },
+      ],
     }),
     credential: new BearerConnectionCredential({
       token: access.access_token,
@@ -129,6 +137,41 @@ export const registerPairingConnection = Effect.fn(
 
 const isBearerCredential = Schema.is(BearerConnectionCredential);
 const isBearerProfile = Schema.is(BearerConnectionProfile);
+
+const normalizeBearerEndpoints = Effect.fn(
+  "clientRuntime.connection.onboarding.normalizeBearerEndpoints",
+)(function* (values: ReadonlyArray<string>) {
+  const candidates = values.map((value) => value.trim()).filter((value) => value !== "");
+  if (candidates.length === 0) {
+    return yield* new ConnectionBlockedError({
+      reason: "configuration",
+      detail: "At least one environment URL is required.",
+    });
+  }
+  const normalized = yield* Effect.forEach(candidates, (candidate) =>
+    Effect.try({
+      try: () => normalizeHttpBaseUrl(candidate),
+      catch: (cause) =>
+        new ConnectionBlockedError({
+          reason: "configuration",
+          detail: cause instanceof Error ? cause.message : "The environment URL is invalid.",
+        }),
+    }),
+  );
+  const unique = [...new Set(normalized)];
+  if (unique.length > MAX_BEARER_CONNECTION_ENDPOINTS) {
+    return yield* new ConnectionBlockedError({
+      reason: "configuration",
+      detail: `A saved environment supports at most ${MAX_BEARER_CONNECTION_ENDPOINTS} URLs.`,
+    });
+  }
+  return unique.map(
+    (httpBaseUrl): BearerConnectionEndpoint => ({
+      httpBaseUrl,
+      wsBaseUrl: deriveWsBaseUrl(httpBaseUrl),
+    }),
+  );
+});
 
 export const updateBearerConnection = Effect.fn(
   "clientRuntime.connection.onboarding.updateBearerConnection",
@@ -184,14 +227,8 @@ export const prepareBearerConnectionUpdate = Effect.fn(
       detail: "Environment label cannot be empty.",
     });
   }
-  const httpBaseUrl = yield* Effect.try({
-    try: () => normalizeHttpBaseUrl(options.input.httpBaseUrl),
-    catch: (cause) =>
-      new ConnectionBlockedError({
-        reason: "configuration",
-        detail: cause instanceof Error ? cause.message : "The environment URL is invalid.",
-      }),
-  });
+  const endpoints = yield* normalizeBearerEndpoints(options.input.httpBaseUrls);
+  const firstEndpoint = endpoints[0]!;
   const connectionId = entry.target.connectionId;
   return new BearerConnectionRegistration({
     target: new BearerConnectionTarget({
@@ -203,8 +240,9 @@ export const prepareBearerConnectionUpdate = Effect.fn(
       connectionId,
       environmentId: options.input.environmentId,
       label,
-      httpBaseUrl,
-      wsBaseUrl: deriveWsBaseUrl(httpBaseUrl),
+      httpBaseUrl: firstEndpoint.httpBaseUrl,
+      wsBaseUrl: firstEndpoint.wsBaseUrl,
+      endpoints: [firstEndpoint, ...endpoints.slice(1)],
     }),
     credential: credential.value,
   });
